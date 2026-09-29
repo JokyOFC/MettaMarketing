@@ -4,6 +4,7 @@ import { Plus, Users } from "lucide-react";
 import { useAuth } from "../../auth/index.js";
 import { usePageTitle } from "../../shell/index.js";
 import {
+  Badge,
   Button,
   DataTable,
   FilterBar,
@@ -89,7 +90,14 @@ export default function ClientsList() {
         <span className="crm-namecell">
           <BrandMark name={row.name} size={36} tone={row.status === "active" ? "olive" : "stone"} />
           <span className="crm-namecell__text">
-            <span className="crm-namecell__title">{row.name}</span>
+            <span className="crm-namecell__title">
+              {row.name}
+              {row.source === "signup" && (
+                <Badge size="sm" tone="slate" className="crm-source">
+                  Cadastro pelo site
+                </Badge>
+              )}
+            </span>
             {(row.legalName || row.contactName) && (
               <span className="crm-namecell__meta">{row.legalName || row.contactName}</span>
             )}

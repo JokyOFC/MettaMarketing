@@ -32,6 +32,7 @@ import releasesRoutes from "./routes/releases.js";
 import reportsRoutes from "./routes/reports.js";
 import reviewsRoutes from "./routes/reviews.js";
 import settingsRoutes from "./routes/settings.js";
+import signupRoutes from "./routes/signup.js";
 import teamRoutes from "./routes/team.js";
 import uploadsRoutes from "./routes/uploads.js";
 import webhooksRoutes from "./routes/webhooks.js";
@@ -100,6 +101,7 @@ function securityHeaders(config) {
 // parser so it can read the raw body itself.
 const ROUTERS = [
   authRoutes,
+  signupRoutes,
   uploadsRoutes,
   materialsRoutes,
   releasesRoutes,

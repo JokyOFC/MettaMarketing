@@ -6,6 +6,8 @@ export const DEFAULT_SETTINGS = {
   supportEmail: "suporte@mettamkt.com.br",
   defaultNotifyEmail: true,
   zipRetentionHours: 24,
+  // /cadastro accepts new client accounts (confirmed by e-mail)
+  signupEnabled: true,
 };
 
 export async function getSetting(db, key, fallback = DEFAULT_SETTINGS[key]) {

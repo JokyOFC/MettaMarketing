@@ -79,7 +79,7 @@ function seoPages() {
       );
       write(
         "robots.txt",
-        `User-agent: *\nAllow: /\nDisallow: /painel\nDisallow: /admin\nDisallow: /convite/\nDisallow: /redefinir-senha/\n\nSitemap: ${SITE_URL}/sitemap.xml\n`,
+        `User-agent: *\nAllow: /\nDisallow: /painel\nDisallow: /admin\nDisallow: /convite/\nDisallow: /redefinir-senha/\nDisallow: /confirmar-email/\n\nSitemap: ${SITE_URL}/sitemap.xml\n`,
       );
     },
   };

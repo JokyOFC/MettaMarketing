@@ -222,6 +222,7 @@ export async function peekToken(ctx, rawToken, purpose = null) {
   if (!user || user.status === "disabled") return null;
   if (row.purpose === "invite" && user.status !== "invited") return null;
   if (row.purpose === "reset" && user.status !== "active") return null;
+  if (row.purpose === "verify" && user.status !== "pending") return null;
   return { token: row, user };
 }
 

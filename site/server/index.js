@@ -23,6 +23,7 @@ function serveSite(app, config) {
     admin: read("admin.html") ?? notFoundHtml,
     convite: read("convite.html") ?? notFoundHtml,
     reset: read("redefinir-senha.html") ?? notFoundHtml,
+    confirm: read("confirmar-email.html") ?? notFoundHtml,
   };
   const sendHtml = (res, html, status = 200) => {
     res.status(status);
@@ -56,6 +57,7 @@ function serveSite(app, config) {
   // Invitation and reset links from e-mails; the page validates the token.
   app.get("/convite/:token", (req, res) => sendHtml(res, shells.convite));
   app.get("/redefinir-senha/:token", (req, res) => sendHtml(res, shells.reset));
+  app.get("/confirmar-email/:token", (req, res) => sendHtml(res, shells.confirm));
   app.use((req, res, next) => {
     if (req.method !== "GET" && req.method !== "HEAD") return next();
     sendHtml(res, notFoundHtml, 404);

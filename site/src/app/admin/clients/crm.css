@@ -213,6 +213,10 @@
   font-weight: 500;
   color: var(--app-ink);
 }
+.crm-source {
+  margin-left: 8px;
+  vertical-align: 1px;
+}
 .crm-namecell__meta {
   font-size: 12px;
   color: var(--app-muted);

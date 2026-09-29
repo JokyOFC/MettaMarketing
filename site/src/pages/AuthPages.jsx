@@ -175,11 +175,29 @@ function loginMessage(error) {
     case "account_disabled":
     case "disabled":
       return "Este acesso está desativado. Fale com a equipe da Metta para reativá-lo.";
+    case "email_not_verified":
+      return "Falta confirmar o seu e-mail: abra o link que enviamos quando você criou a conta.";
     case "network":
       return NETWORK_MESSAGE;
     default:
       return error.message;
   }
+}
+
+// Asks for a new e-mail confirmation link (the answer never says whether the
+// address has an account). -> { resend, state: 'idle'|'busy'|'sent'|'error' }
+function useResendConfirmation() {
+  const [state, setState] = useState("idle");
+  async function resend(email) {
+    setState("busy");
+    try {
+      await api.post("/auth/signup/resend", { email: String(email || "").trim() });
+      setState("sent");
+    } catch {
+      setState("error");
+    }
+  }
+  return { resend, state };
 }
 
 export function LoginPage() {
@@ -192,7 +210,9 @@ export function LoginPage() {
   const [password, setPassword] = useState("");
   const [visible, setVisible] = useState(false);
   const [error, setError] = useState("");
+  const [unverified, setUnverified] = useState(false);
   const [busy, setBusy] = useState(false);
+  const confirmation = useResendConfirmation();
   const expired = sessionLost || location.state?.reason === "expired";
 
   if (user && !busy) return <Navigate to={safeNext(next, user)} replace />;
@@ -200,6 +220,7 @@ export function LoginPage() {
   async function submit(event) {
     event.preventDefault();
     setError("");
+    setUnverified(false);
     setBusy(true);
     try {
       const signedIn = await login(email.trim(), password);
@@ -207,6 +228,7 @@ export function LoginPage() {
       navigate(safeNext(next, signedIn), { replace: true });
     } catch (failure) {
       setError(loginMessage(failure));
+      setUnverified(failure.code === "email_not_verified");
       setBusy(false);
     }
   }
@@ -221,7 +243,7 @@ export function LoginPage() {
       lead="Entre para acompanhar a sua marca, os conteúdos e as entregas da Metta."
       footer={
         <p className="auth-switch">
-          Ainda não tem acesso? <Link to="/cadastro">Saiba como funciona o convite</Link>
+          Ainda não tem acesso? <Link to="/cadastro">Criar conta</Link>
         </p>
       }
     >
@@ -261,10 +283,419 @@ export function LoginPage() {
           </Link>
         </div>
         <FormError>{error}</FormError>
+        {unverified && (
+          <div className="acc-resend" role="status">
+            {confirmation.state === "sent" ? (
+              <p>
+                Se o cadastro ainda estiver pendente, um novo link chega em <strong>{email.trim()}</strong> em alguns
+                minutos. Confira também o spam.
+              </p>
+            ) : (
+              <button
+                type="button"
+                className="acc-link"
+                onClick={() => confirmation.resend(email)}
+                disabled={confirmation.state === "busy"}
+              >
+                {confirmation.state === "busy" ? "Enviando…" : "Reenviar o link de confirmação"}
+              </button>
+            )}
+            {confirmation.state === "error" && <p>Não foi possível pedir o link agora. Tente de novo em instantes.</p>}
+          </div>
+        )}
         <SubmitButton busy={busy} busyLabel="Entrando…">
           Entrar
         </SubmitButton>
       </form>
+    </AuthLayout>
+  );
+}
+
+// ------------------------------------------------------------------ sign-up
+
+const EMPTY_SIGNUP = {
+  name: "",
+  email: "",
+  company: "",
+  phone: "",
+  document: "",
+  password: "",
+  confirm: "",
+  acceptTerms: false,
+  website: "",
+};
+
+export function SignupPage() {
+  const { user } = useAuth();
+  const ids = { hints: useId(), password: useId(), confirm: useId(), terms: useId() };
+  const [open, setOpen] = useState(null);
+  const [form, setForm] = useState(EMPTY_SIGNUP);
+  const [visible, setVisible] = useState(false);
+  const [fields, setFields] = useState({});
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [sentTo, setSentTo] = useState(null);
+  const confirmation = useResendConfirmation();
+
+  // Whether the team keeps sign-up open (Configurações). A failed check still
+  // shows the form: the server has the last word.
+  useEffect(() => {
+    const controller = new AbortController();
+    api
+      .get("/auth/signup", { signal: controller.signal })
+      .then((data) => setOpen(data?.enabled !== false))
+      .catch((failure) => {
+        if (failure.name !== "AbortError") setOpen(true);
+      });
+    return () => controller.abort();
+  }, []);
+
+  if (user) return <Navigate to={homeFor(user)} replace />;
+  if (open === false) return <InviteOnlyPage />;
+
+  const bind = (key) => ({
+    value: form[key],
+    onChange: (event) => setForm((current) => ({ ...current, [key]: event.target.value })),
+    "aria-invalid": Boolean(fields[key]) || undefined,
+  });
+  const fieldError = (key) => fields[key] && <span className="acc-field-error">{fields[key]}</span>;
+
+  async function submit(event) {
+    event.preventDefault();
+    setError("");
+    const problems = checkNewPassword(form.password, form.confirm);
+    if (!form.name.trim()) problems.name = "Informe o seu nome.";
+    if (!form.company.trim()) problems.company = "Informe o nome da empresa ou da marca.";
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) problems.email = "Informe um e-mail válido.";
+    if (form.password && form.password.trim().toLowerCase() === form.email.trim().toLowerCase())
+      problems.password = "A senha não pode ser igual ao e-mail.";
+    const digits = form.document.replace(/\D/g, "");
+    if (form.document.trim() && digits.length !== 11 && digits.length !== 14)
+      problems.document = "Informe um CPF (11 dígitos) ou um CNPJ (14 dígitos).";
+    if (!form.acceptTerms) problems.acceptTerms = "Aceite os termos para criar a conta.";
+    setFields(problems);
+    if (Object.keys(problems).length) return;
+    setBusy(true);
+    try {
+      const data = await api.post("/auth/signup", {
+        name: form.name.trim(),
+        email: form.email.trim(),
+        company: form.company.trim(),
+        phone: form.phone.trim(),
+        document: form.document.trim(),
+        password: form.password,
+        acceptTerms: form.acceptTerms,
+        website: form.website,
+      });
+      setForm((current) => ({ ...current, password: "", confirm: "" }));
+      setSentTo(data?.email || form.email.trim());
+    } catch (failure) {
+      if (failure.code === "signup_closed") setOpen(false);
+      else {
+        if (failure.fields) setFields(failure.fields);
+        setError(failure.code === "validation" && failure.fields ? "" : failure.message);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (sentTo)
+    return (
+      <AuthLayout
+        kicker="CRIAR CONTA"
+        title={
+          <>
+            Falta pouco, <em>confirme.</em>
+          </>
+        }
+        footer={
+          <p className="auth-switch">
+            Já confirmou? <Link to="/login">Entrar</Link>
+          </p>
+        }
+      >
+        <StatePanel icon={MailCheck} title="Confira a sua caixa de entrada.">
+          <p>
+            Enviamos um link de confirmação para <strong>{sentTo}</strong>. Abra o link para ativar o acesso: ele
+            vale por 48 horas. Confira também a pasta de spam.
+          </p>
+        </StatePanel>
+        <div className="acc-actions">
+          {confirmation.state === "sent" ? (
+            <p className="form-note" role="status">
+              Pedimos um novo link. Ele chega em alguns minutos.
+            </p>
+          ) : (
+            <button
+              type="button"
+              className="button"
+              onClick={() => confirmation.resend(sentTo)}
+              disabled={confirmation.state === "busy"}
+            >
+              {confirmation.state === "busy" ? "Enviando…" : "Reenviar o link"}
+              <Arrow />
+            </button>
+          )}
+          {confirmation.state === "error" && <FormError>Não foi possível pedir o link agora. Tente de novo em instantes.</FormError>}
+          <button type="button" className="acc-link" onClick={() => setSentTo(null)}>
+            Usei o e-mail errado
+          </button>
+        </div>
+      </AuthLayout>
+    );
+
+  return (
+    <AuthLayout
+      kicker="CRIAR CONTA"
+      title={
+        <>
+          Crie o acesso da sua <em>empresa.</em>
+        </>
+      }
+      lead="Em poucos minutos a sua empresa tem um espaço para acompanhar a marca, os conteúdos e as entregas da Metta."
+      footer={
+        <p className="auth-switch">
+          Já tem acesso? <Link to="/login">Entrar</Link>
+        </p>
+      }
+    >
+      {open === null ? (
+        <div className="acc-skeleton" aria-busy="true" aria-label="Carregando cadastro">
+          <span />
+          <span />
+          <span />
+        </div>
+      ) : (
+        <form className="metta-form" onSubmit={submit} noValidate>
+          <label>
+            Seu nome
+            <input required autoComplete="name" maxLength={120} {...bind("name")} />
+            {fieldError("name")}
+          </label>
+          <label>
+            E-mail
+            <input type="email" required autoComplete="email" inputMode="email" maxLength={254} {...bind("email")} />
+            {fieldError("email")}
+          </label>
+          <label>
+            Empresa ou marca
+            <input required autoComplete="organization" maxLength={160} {...bind("company")} />
+            {fieldError("company")}
+          </label>
+          <div className="acc-grid-2">
+            <label>
+              <span>
+                Telefone ou WhatsApp <span className="acc-optional">opcional</span>
+              </span>
+              <input type="tel" autoComplete="tel" inputMode="tel" maxLength={40} {...bind("phone")} />
+              {fieldError("phone")}
+            </label>
+            <label>
+              <span>
+                CNPJ ou CPF <span className="acc-optional">opcional</span>
+              </span>
+              <input inputMode="numeric" maxLength={40} {...bind("document")} />
+              {fieldError("document")}
+            </label>
+          </div>
+          <label htmlFor={ids.password}>
+            Crie uma senha
+            <PasswordInput
+              id={ids.password}
+              value={form.password}
+              onChange={(value) => setForm((current) => ({ ...current, password: value }))}
+              autoComplete="new-password"
+              invalid={Boolean(fields.password)}
+              describedBy={ids.hints}
+              visible={visible}
+              onToggle={() => setVisible(!visible)}
+            />
+            {fieldError("password")}
+          </label>
+          <label htmlFor={ids.confirm}>
+            Confirme a senha
+            <input
+              id={ids.confirm}
+              type={visible ? "text" : "password"}
+              autoComplete="new-password"
+              required
+              {...bind("confirm")}
+            />
+            {fieldError("confirm")}
+          </label>
+          <PasswordHints id={ids.hints} password={form.password} confirm={form.confirm} email={form.email} name={form.name} />
+          {/* Left empty by people; bots that fill it are dropped by the server. */}
+          <div className="acc-trap" aria-hidden="true">
+            <label>
+              Site
+              <input tabIndex={-1} autoComplete="off" {...bind("website")} />
+            </label>
+          </div>
+          <div className="acc-consent">
+            <input
+              id={ids.terms}
+              type="checkbox"
+              checked={form.acceptTerms}
+              onChange={(event) => setForm((current) => ({ ...current, acceptTerms: event.target.checked }))}
+              aria-invalid={Boolean(fields.acceptTerms) || undefined}
+            />
+            <label htmlFor={ids.terms}>
+              Concordo que a Metta use estes dados para criar e administrar o acesso da minha empresa, conforme a
+              LGPD.
+            </label>
+          </div>
+          {fieldError("acceptTerms")}
+          <FormError>{error}</FormError>
+          <SubmitButton busy={busy} busyLabel="Criando conta…">
+            Criar conta
+          </SubmitButton>
+          <p className="form-note">
+            Enviamos um link para confirmar o e-mail. O acesso é ativado quando você abrir esse link.
+          </p>
+        </form>
+      )}
+    </AuthLayout>
+  );
+}
+
+// ---------------------------------------------------------- e-mail confirmation
+
+export function VerifyEmailPage() {
+  const { token } = useParams();
+  const navigate = useNavigate();
+  const { setUser } = useAuth();
+  const [state, setState] = useState({ status: "loading" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [email, setEmail] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const confirmation = useResendConfirmation();
+
+  // Only checks the link: e-mail scanners open links too, so the access is
+  // activated by the button below, never by the page load.
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ status: "loading" });
+    api
+      .get(`/auth/verify/${encodeURIComponent(token)}`, { signal: controller.signal })
+      .then((data) => setState({ status: "ready", ...data }))
+      .catch((failure) => {
+        if (failure.name === "AbortError") return;
+        setState(
+          ["expired", "not_found", "bad_request"].includes(failure.code)
+            ? { status: "invalid" }
+            : { status: "error", error: failure },
+        );
+      });
+    return () => controller.abort();
+  }, [token, attempt]);
+
+  async function confirm() {
+    setError("");
+    setBusy(true);
+    try {
+      const data = await api.post("/auth/verify", { token });
+      setUser(data.user);
+      navigate(homeFor(data.user), { replace: true });
+    } catch (failure) {
+      setBusy(false);
+      if (failure.code === "expired" || failure.code === "not_found") setState({ status: "invalid" });
+      else setError(failure.message);
+    }
+  }
+
+  if (state.status === "invalid")
+    return (
+      <AuthLayout
+        kicker="CRIAR CONTA"
+        title="Link indisponível."
+        footer={
+          <p className="auth-switch">
+            Já confirmou antes? <Link to="/login">Entrar</Link>
+          </p>
+        }
+      >
+        <StatePanel icon={TimerOff} title="Este link expirou ou já foi usado.">
+          <p>Se o e-mail já foi confirmado, basta entrar. Se não, peça um novo link abaixo.</p>
+        </StatePanel>
+        {confirmation.state === "sent" ? (
+          <p className="acc-note" role="status">
+            Se o cadastro de <strong>{email.trim()}</strong> ainda estiver pendente, um novo link chega em alguns minutos.
+          </p>
+        ) : (
+          <form
+            className="metta-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (email.trim()) confirmation.resend(email);
+            }}
+          >
+            <label>
+              E-mail do cadastro
+              <input
+                type="email"
+                autoComplete="email"
+                inputMode="email"
+                required
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+              />
+            </label>
+            {confirmation.state === "error" && <FormError>Não foi possível pedir o link agora. Tente de novo em instantes.</FormError>}
+            <SubmitButton busy={confirmation.state === "busy"} busyLabel="Enviando…">
+              Enviar novo link
+            </SubmitButton>
+          </form>
+        )}
+      </AuthLayout>
+    );
+
+  return (
+    <AuthLayout
+      kicker="CRIAR CONTA"
+      title={
+        <>
+          Confirme o seu <em>e-mail.</em>
+        </>
+      }
+      lead="Um passo para ativar o acesso da sua empresa à Metta."
+      footer={
+        <p className="auth-switch">
+          Dúvidas? <a href={mailto("Cadastro na área do cliente")}>Fale com a Metta</a>
+        </p>
+      }
+    >
+      {state.status === "loading" && (
+        <div className="acc-skeleton" aria-busy="true" aria-label="Conferindo o link">
+          <span />
+          <span />
+        </div>
+      )}
+      {state.status === "error" && (
+        <div className="acc-actions">
+          <FormError>{state.error?.message}</FormError>
+          <button type="button" className="button" onClick={() => setAttempt((n) => n + 1)}>
+            Tentar de novo
+            <Arrow />
+          </button>
+        </div>
+      )}
+      {state.status === "ready" && (
+        <>
+          <div className="acc-email acc-email--spaced">
+            <span>{state.company ? `Acesso de ${state.company}` : "Acesso"}</span>
+            <strong>{state.email}</strong>
+          </div>
+          <FormError>{error}</FormError>
+          <div className="acc-actions">
+            <button type="button" className="button solid acc-submit" onClick={confirm} disabled={busy} aria-busy={busy || undefined}>
+              {busy ? "Ativando…" : "Confirmar e entrar"}
+              <Arrow />
+            </button>
+          </div>
+        </>
+      )}
     </AuthLayout>
   );
 }

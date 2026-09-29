@@ -16,6 +16,7 @@ const settingsSchema = z.object({
   orgName: schemas.text(120).optional(),
   supportEmail: schemas.email.optional(),
   defaultNotifyEmail: z.boolean().optional(),
+  signupEnabled: z.boolean().optional(),
   zipRetentionHours: z
     .number({ error: "Informe um número de horas." })
     .int("Use um número inteiro de horas.")
@@ -28,12 +29,13 @@ const SETTING_LABELS = {
   orgName: "nome da organização",
   supportEmail: "e-mail de suporte",
   defaultNotifyEmail: "avisos por e-mail para novos usuários",
+  signupEnabled: "cadastro aberto no site",
   zipRetentionHours: "retenção dos ZIPs",
 };
 
-// One-time links (invites, password resets, downloads) are replaced before a
+// One-time links (invites, password resets, e-mail confirmations, downloads) are replaced before a
 // message body leaves the server.
-const TOKEN_LINK = /(\/(?:convite|redefinir-senha|dl)\/)[^\s"'<>)\]]+/gi;
+const TOKEN_LINK = /(\/(?:convite|redefinir-senha|confirmar-email|dl)\/)[^\s"'<>)\]]+/gi;
 export const redactLinks = (text) => String(text ?? "").replace(TOKEN_LINK, "$1[link oculto]");
 
 export function mercadoPagoMode(token) {
@@ -47,6 +49,7 @@ async function publicSettings(db) {
     orgName: all.orgName,
     supportEmail: all.supportEmail,
     defaultNotifyEmail: Boolean(all.defaultNotifyEmail),
+    signupEnabled: all.signupEnabled !== false,
     zipRetentionHours: Number(all.zipRetentionHours) || 24,
   };
 }

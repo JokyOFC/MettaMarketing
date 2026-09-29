@@ -106,7 +106,8 @@ export function serializeClient(req, row) {
     updatedAt: row.updated_at,
   };
   if (!isStaff(req)) return contact;
-  return { ...contact, internalNotes: row.internal_notes ?? null };
+  // source: 'staff' (created by the team) | 'signup' (self sign-up at /cadastro)
+  return { ...contact, internalNotes: row.internal_notes ?? null, source: row.source ?? "staff" };
 }
 
 // Brand = { id, clientId, client:{id,name}, name, slug, description,

@@ -9,6 +9,7 @@ const toForm = (settings) => ({
   supportEmail: settings.supportEmail ?? "",
   zipRetentionHours: String(settings.zipRetentionHours ?? 24),
   defaultNotifyEmail: Boolean(settings.defaultNotifyEmail),
+  signupEnabled: settings.signupEnabled !== false,
 });
 
 export default function OrganizationTab() {
@@ -49,6 +50,7 @@ export default function OrganizationTab() {
         supportEmail: form.supportEmail.trim(),
         zipRetentionHours: hours,
         defaultNotifyEmail: form.defaultNotifyEmail,
+        signupEnabled: form.signupEnabled,
       });
       setData(res);
       toast.success("Configurações salvas.");
@@ -104,6 +106,15 @@ export default function OrganizationTab() {
           description="Novas pessoas convidadas começam recebendo avisos por e-mail. Cada pessoa pode mudar isso em Conta."
           checked={form.defaultNotifyEmail}
           onCheckedChange={set("defaultNotifyEmail")}
+        />
+      </Panel>
+
+      <Panel eyebrow="Acesso" title="Cadastro pelo site" index={3}>
+        <Switch
+          label="Cadastro aberto"
+          description="Qualquer pessoa pode criar a conta da empresa em /cadastro. O acesso só é ativado depois que ela confirma o e-mail (é preciso o SMTP configurado em Integrações), e cada novo cadastro chega às notificações dos administradores. Desligado, a página explica que o acesso é por convite."
+          checked={form.signupEnabled}
+          onCheckedChange={set("signupEnabled")}
         />
       </Panel>
 

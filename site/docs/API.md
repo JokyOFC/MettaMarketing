@@ -96,7 +96,7 @@ Activity     = { id, actor: UserRef|null, action, entityType, entityId, summary,
 
 | Método | Caminho | Corpo / resposta |
 | ------ | ------- | ---------------- |
-| POST | `/api/auth/login` | `{email,password}` → `{user: Me}`; 401 `invalid_credentials` (mensagem genérica); 429 |
+| POST | `/api/auth/login` | `{email,password}` → `{user: Me}`; 401 `invalid_credentials` (mensagem genérica); 403 `email_not_verified` (cadastro pelo site ainda não confirmado — só com a senha certa); 429 |
 | POST | `/api/auth/logout` | 204 |
 | GET | `/api/auth/me` | `{user: Me}` ou 401 |
 | GET | `/api/auth/invite/:token` | `{email, name, purpose}` ou 410 |
@@ -107,6 +107,19 @@ Activity     = { id, actor: UserRef|null, action, entityType, entityId, summary,
 | PATCH | `/api/auth/profile` | `{name?, jobTitle?, phone?, notifyEmail?}` → `{user: Me}` |
 | GET | `/api/auth/sessions` | `{items:[{id, createdAt, lastSeenAt, userAgent, ip, current}]}` |
 | DELETE | `/api/auth/sessions/:id` | 204 |
+
+### Cadastro pelo site (`routes/signup.js`)
+
+Sem sessão. As respostas nunca dizem se um e-mail já tem acesso. Fechado pela equipe
+(`signupEnabled = false` em `/api/settings`), `POST /api/auth/signup` responde 403 `signup_closed`.
+
+| Método | Caminho | Corpo / resposta |
+| ------ | ------- | ---------------- |
+| GET | `/api/auth/signup` | `{enabled}` — se `/cadastro` mostra o formulário |
+| POST | `/api/auth/signup` | `{name, email, company, phone?, document? (CPF/CNPJ), password, acceptTerms: true, website? (armadilha, vazio)}` → 202 `{email}`. Cria o cliente (`source = 'signup'`) e o acesso `pending`, e grava o e-mail com o link `/confirmar-email/:token` (48 h). E-mail já cadastrado: 202 igual; se pendente, reenvia o link (no máximo 1 por minuto), senão avisa o dono da conta. 422 com campos; 429 (5 cadastros/hora por IP em produção) |
+| POST | `/api/auth/signup/resend` | `{email}` → 202 sempre; acesso pendente recebe um link novo (o anterior deixa de valer) |
+| GET | `/api/auth/verify/:token` | `{email, name, company}` ou 410 — só confere, não ativa (leitores de e-mail abrem links) |
+| POST | `/api/auth/verify` | `{token}` → `{user: Me}` e cookie de sessão; ativa o acesso, avisa os administradores (`client.signed_up`, com e-mail) e registra no histórico; 410 se usado/expirado |
 
 ## Clientes, marcas, equipe, projetos — Fatia E
 

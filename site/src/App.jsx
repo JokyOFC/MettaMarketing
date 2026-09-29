@@ -17,7 +17,7 @@ import "./pages.css";
 // Access pages, client area and Metta panel live in their own bundle.
 const ProductApp = lazy(() => import("./app/ProductApp.jsx"));
 const isProduct = (path) =>
-  /^\/(login|cadastro|registro|convite|recuperar-senha|redefinir-senha|painel|admin)(\/|$)/.test(
+  /^\/(login|cadastro|registro|convite|confirmar-email|recuperar-senha|redefinir-senha|painel|admin)(\/|$)/.test(
     path,
   );
 const ProductBoot = () => (

@@ -222,7 +222,80 @@
     opacity: 0.55;
   }
 }
+/* Sign-up (/cadastro) and e-mail confirmation */
+.acc-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px 16px;
+}
+.acc-optional {
+  margin-left: 6px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.acc-trap {
+  position: absolute;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+.acc-consent {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 12px;
+  align-items: start;
+}
+.metta-form .acc-consent input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  margin: 3px 0 0;
+  padding: 0;
+  accent-color: #55653f;
+  cursor: pointer;
+}
+.metta-form .acc-consent label {
+  display: block;
+  font-size: 13px;
+  letter-spacing: 0;
+  line-height: 1.6;
+  color: var(--ink);
+  cursor: pointer;
+}
+.acc-consent + .acc-field-error {
+  margin-top: -12px;
+}
+button.acc-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+button.acc-link:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.acc-resend {
+  margin-top: -6px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.acc-resend p {
+  margin: 0 !important;
+  font-size: 13px !important;
+}
+.acc-email--spaced {
+  margin-top: 32px;
+}
 @media (max-width: 760px) {
+  .acc-grid-2 {
+    grid-template-columns: 1fr;
+  }
   .acc-hints {
     grid-template-columns: 1fr;
   }
