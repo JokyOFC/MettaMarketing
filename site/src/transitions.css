@@ -1,0 +1,116 @@
+/* A single curtain belongs to the router, never to an individual page. */
+html[data-route-busy="true"] {
+  overflow: hidden;
+}
+.page-curtain {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  pointer-events: none;
+  color: var(--metta-paper);
+}
+.curtain-surface {
+  position: absolute;
+  inset: 0;
+  background: var(--metta-olive-900);
+  transform: translateY(101%);
+}
+.curtain-brand {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+}
+.curtain-brand .logo {
+  width: min(340px, 60vw);
+}
+.curtain-brand > span {
+  margin-top: 30px;
+  font: italic 24px var(--metta-font-accent, "Cormorant Garamond", serif);
+  color: var(--metta-sage);
+}
+.curtain-edition {
+  position: absolute;
+  top: 42px;
+  left: 5.4%;
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  opacity: 0;
+}
+.curtain-initial .curtain-surface,
+.curtain-covered .curtain-surface {
+  transform: translateY(0);
+}
+.curtain-initial .curtain-brand {
+  animation: curtain-brand-in 1s 0.15s both;
+}
+.curtain-initial .curtain-edition {
+  animation: curtain-brand-in 0.8s 0.2s both;
+}
+.curtain-cover .curtain-surface {
+  animation: curtain-cover 0.48s cubic-bezier(0.65, 0, 0.35, 1) both;
+}
+.curtain-cover .curtain-brand {
+  animation: curtain-brand-in 0.35s 0.2s both;
+}
+.curtain-covered .curtain-brand {
+  opacity: 1;
+}
+.curtain-reveal .curtain-surface {
+  animation: curtain-reveal 0.76s cubic-bezier(0.76, 0, 0.24, 1) both;
+}
+.curtain-reveal .curtain-brand {
+  animation: curtain-brand-out 0.38s both;
+}
+.curtain-idle {
+  visibility: hidden;
+}
+@keyframes curtain-cover {
+  from {
+    transform: translateY(101%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+@keyframes curtain-reveal {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-101%);
+  }
+}
+@keyframes curtain-brand-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes curtain-brand-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-25px);
+  }
+}
+@media (max-width: 760px) {
+  .curtain-brand > span {
+    font-size: 20px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .page-curtain {
+    display: none;
+  }
+}

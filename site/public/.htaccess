@@ -1,0 +1,43 @@
+# Apache / LiteSpeed (cPanel, Hostinger, Locaweb…). Other hosts ignore this file.
+Options -MultiViews
+DirectorySlash Off
+DirectoryIndex index.html
+ErrorDocument 404 /404.html
+
+AddType image/webp .webp
+AddType video/webm .webm
+AddType video/mp4 .mp4
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  # /sobre/ -> /sobre (one URL per page)
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^(.+)/$ /$1 [R=301,L]
+  # /index.html -> /  and  /sobre.html -> /sobre
+  RewriteCond %{THE_REQUEST} \s/+index\.html[\s?]
+  RewriteRule ^ / [R=301,L]
+  RewriteCond %{THE_REQUEST} \s/+([^?\s]+)\.html[\s?]
+  RewriteCond %1 !^(404|index)$
+  RewriteRule ^ /%1 [R=301,L]
+  # /sobre serves sobre.html; unknown paths fall through to 404.html
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{DOCUMENT_ROOT}/$1.html -f
+  RewriteRule ^([^.]+)$ $1.html [L]
+</IfModule>
+
+<IfModule mod_headers.c>
+  # Hashed build files never change.
+  <FilesMatch "\.(js|css|woff2?)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+  <FilesMatch "\.(webp|jpg|png|svg|mp4|webm)$">
+    Header set Cache-Control "public, max-age=604800"
+  </FilesMatch>
+  <FilesMatch "\.(html|xml|txt)$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+</IfModule>
+
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/css text/plain application/javascript application/xml image/svg+xml
+</IfModule>

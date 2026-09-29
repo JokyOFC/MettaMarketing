@@ -1,0 +1,44 @@
+# dependencies (install with npm ci on each machine: sharp ships per-OS binaries)
+node_modules/
+
+# build output (npm run build)
+dist/
+
+# environment: secrets never go to git; .env.example documents every variable
+.env
+.env.*
+!.env.example
+*.local
+
+# platform runtime data (database, private files, generated secret).
+# In production DATA_DIR lives outside the project and is backed up there.
+server/data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# logs and test output
+*.log
+npm-debug.log*
+coverage/
+
+# packaged builds and releases
+/*.zip
+/*.tgz
+
+# temporary Vite config bundles
+vite.config.*.timestamp-*
+
+# local tooling
+.sites-runtime/
+.claude/settings.local.json
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

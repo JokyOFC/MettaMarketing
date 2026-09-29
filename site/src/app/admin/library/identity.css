@@ -1,0 +1,68 @@
+/* Identity editors (identity.jsx): release state of released colours, fonts
+   and guidelines. Complements library.css; tokens from the UI kit (--app-*). */
+
+/* Released item the viewer cannot change: explains instead of hiding silently. */
+.lib-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--app-muted);
+}
+.lib-lock svg {
+  flex: none;
+}
+.lib-swatch__actions:has(.lib-lock) {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.lib-swatch__actions .lib-lock {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* Guidelines: "Alterado" next to the section title while it differs from the released text. */
+.lib-guide__changed {
+  margin-left: 10px;
+  vertical-align: 3px;
+}
+
+/* Identity release dialog: guideline draft summary. */
+.lib-idrelease__guide {
+  display: grid;
+  gap: 10px;
+}
+.lib-idrelease__peek {
+  border: 1px solid var(--app-line);
+  border-radius: var(--app-radius);
+  background: var(--app-surface-2);
+}
+.lib-idrelease__peek summary {
+  display: list-item;
+  padding: 11px 14px;
+  line-height: 18px;
+  font-size: 12.5px;
+  color: var(--app-ink-2);
+  cursor: pointer;
+}
+.lib-idrelease__peek summary:focus-visible {
+  outline: 2px solid var(--app-focus);
+  outline-offset: 2px;
+  border-radius: var(--app-radius);
+}
+.lib-idrelease__peek-body {
+  display: grid;
+  gap: 14px;
+  max-height: 260px;
+  padding: 4px 14px 14px;
+  overflow: auto;
+}
+.lib-idrelease__peek-body .lib-mini-title {
+  margin-bottom: 6px;
+}
+.lib-idrelease__peek-body .lib-guide__text {
+  font-size: 13px;
+  line-height: 1.6;
+}

@@ -1,0 +1,205 @@
+/* Visual QA page for the kit (dev only). */
+.ui-gallery {
+  display: flex;
+  flex-direction: column;
+  gap: 56px;
+  padding-bottom: 96px;
+  background: none;
+}
+.ui-gallery .ui-pagehead {
+  margin-bottom: 0;
+}
+.ui-gallery__section {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding-top: 28px;
+  border-top: 1px solid var(--app-line);
+}
+.ui-gallery__section-head .ui-eyebrow {
+  margin-bottom: 10px;
+}
+.ui-gallery__row {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+}
+.ui-gallery__label {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--app-muted);
+}
+.ui-gallery__items {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.ui-gallery__swatches {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 12px;
+}
+.ui-gallery__swatch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+  border: 1px solid var(--app-line);
+  border-radius: var(--app-radius);
+  background: var(--app-surface);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--app-fast),
+    transform var(--app-fast) var(--app-ease);
+}
+.ui-gallery__swatch:hover {
+  border-color: var(--app-line-strong);
+  transform: translateY(-1px);
+}
+.ui-gallery__swatch-color {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px rgba(42, 49, 31, 0.12);
+}
+.ui-gallery__swatch-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--app-muted);
+  font-variant-numeric: lining-nums tabular-nums;
+}
+.ui-gallery__swatch-text strong {
+  font-size: 13px;
+  color: var(--app-ink);
+}
+.ui-gallery__type {
+  display: grid;
+  gap: 12px;
+  padding: 24px;
+  border: 1px solid var(--app-line);
+  border-radius: var(--app-radius);
+  background: var(--app-surface);
+}
+.ui-gallery__form {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  gap: 20px 24px;
+  align-items: start;
+}
+.ui-gallery__wide {
+  grid-column: 1 / -1;
+}
+.ui-gallery__stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
+  gap: 16px;
+}
+.ui-gallery__card {
+  overflow: hidden;
+}
+.ui-gallery__card .ui-thumb {
+  border-radius: 0;
+  border-bottom: 1px solid var(--app-line);
+}
+.ui-gallery__card-body {
+  display: grid;
+  gap: 6px;
+  padding: 14px 16px 16px;
+}
+.ui-gallery__card-body strong {
+  font-weight: 500;
+}
+.ui-gallery__cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.ui-gallery__cellthumb {
+  width: 40px;
+  flex-shrink: 0;
+}
+.ui-gallery__thumbs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr));
+  gap: 16px;
+}
+.ui-gallery__thumbs figure {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+.ui-gallery__thumbs figcaption {
+  font-size: 12px;
+  color: var(--app-muted);
+}
+.ui-gallery__invert .ui-thumb__img {
+  filter: invert(0.92);
+}
+.ui-gallery__metas {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
+  gap: 16px;
+  align-items: center;
+}
+.ui-gallery__checker {
+  display: grid;
+  place-items: center;
+  height: 64px;
+  border-radius: var(--app-radius);
+  font-size: 12px;
+  color: var(--app-muted);
+}
+.ui-gallery__uploads {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ui-gallery__uploads li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: 16px;
+  align-items: center;
+  padding: 12px 16px;
+  border: 1px solid var(--app-line);
+  border-radius: var(--app-radius);
+  background: var(--app-surface);
+  animation: ui-enter var(--app-base) var(--app-ease) backwards;
+}
+.ui-gallery__progress {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr));
+  gap: 20px 24px;
+}
+.ui-gallery__skeletons {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 24px;
+}
+.ui-gallery__states {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
+  gap: 16px;
+}
+@media (max-width: 759.98px) {
+  .ui-gallery {
+    gap: 40px;
+  }
+  .ui-gallery__row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .ui-gallery__uploads li,
+  .ui-gallery__skeletons {
+    grid-template-columns: 1fr;
+  }
+}

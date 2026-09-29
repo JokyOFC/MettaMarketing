@@ -1,0 +1,51 @@
+// Vector reconstruction of the supplied Metta wordmark, based on the PDF cover.
+// Paths preserve its wide geometric letterforms and shared double-t crossbar.
+export default function Logo({ className = "" }) {
+  return (
+    <svg
+      className={`logo ${className}`}
+      viewBox="0 0 612 216"
+      fill="none"
+      aria-hidden="true"
+    >
+      <g
+        className="logo-word"
+        stroke="currentColor"
+        strokeWidth="6.5"
+        strokeLinecap="butt"
+        strokeLinejoin="round"
+      >
+        <path
+          pathLength="1"
+          d="M8 153V80C27 38 91 42 91 94V153M91 94C91 38 176 36 176 93V153"
+        />
+        <path
+          className="logo-m-cut"
+          d="M4.75 52H11.25V66L4.75 74Z"
+          fill="currentColor"
+          stroke="none"
+        />
+        <path
+          pathLength="1"
+          d="M306 139C282 157 254 161 230 145C201 126 199 91 215 69C243 30 313 50 313 103H205"
+        />
+        <path pathLength="1" d="M346 12V112C346 149 367 161 401 149" />
+        <path pathLength="1" d="M420 12V112C420 149 441 161 475 149" />
+        <path pathLength="1" d="M323 53H477" />
+        <path
+          pathLength="1"
+          d="M603 153V89C603 49 559 39 512 62M591 102H545C516 102 501 112 501 130C501 163 566 159 592 139"
+        />
+      </g>
+      <g
+        className="logo-subtitle"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="square"
+        strokeLinejoin="miter"
+      >
+        <path d="M102 212V188L114 212L126 188V212M158 212L169 188L180 212M162 204H176M209 212V188H219C232 188 232 201 219 201H209M219 201L232 212M258 188V212M275 188L259 201L278 212M321 188H306V212H322M306 200H319M351 188H374M362.5 188V212M404 188V212M438 212V188L457 212V188M511 193C506 185 489 185 488 200C487 214 505 216 512 209V201H502" />
+      </g>
+    </svg>
+  );
+}
