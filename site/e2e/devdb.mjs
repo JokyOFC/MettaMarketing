@@ -66,7 +66,7 @@ export async function openDevDb(url) {
     async setOrderStatus(orderId, status) {
       await query("UPDATE orders SET status = ?, updated_at = ? WHERE id = ?", [status, nowIso(), orderId]);
     },
-    // Latest outbox message sent to an address (e.g. the sign-up confirmation link).
+    // Latest outbox message sent to an address (e.g. an invitation link).
     async lastEmail(to) {
       return one("SELECT * FROM email_outbox WHERE to_email = ? ORDER BY created_at DESC, seq DESC LIMIT 1", [to.toLowerCase()]);
     },

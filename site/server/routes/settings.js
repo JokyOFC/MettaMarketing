@@ -33,9 +33,9 @@ const SETTING_LABELS = {
   zipRetentionHours: "retenção dos ZIPs",
 };
 
-// One-time links (invites, password resets, e-mail confirmations, downloads) are replaced before a
+// One-time links (invites, password resets, downloads) are replaced before a
 // message body leaves the server.
-const TOKEN_LINK = /(\/(?:convite|redefinir-senha|confirmar-email|dl)\/)[^\s"'<>)\]]+/gi;
+const TOKEN_LINK = /(\/(?:convite|redefinir-senha|dl)\/)[^\s"'<>)\]]+/gi;
 export const redactLinks = (text) => String(text ?? "").replace(TOKEN_LINK, "$1[link oculto]");
 
 export function mercadoPagoMode(token) {

@@ -5,14 +5,12 @@
 //
 // Needs the dev servers (npm run dev + npm run dev:api) and the dev seed
 // (npm run seed:dev), with sign-up open in Configurações (the default). The
-// confirmation e-mail is read from the dev outbox (no SMTP needed); the admin
-// session is minted in the dev DB (no passwords typed for the team).
+// admin session is minted in the dev DB (no passwords typed for the team).
 //
 // Steps:
-//   1 a visitor opens /cadastro, fills the form and gets "confira a sua caixa de entrada"
-//   2 before confirming, logging in with the new password explains that the e-mail is pending
-//   3 the confirmation link from the e-mail opens, "Confirmar e entrar" lands on /painel
-//   4 the admin sees the notice and the new client marked "Cadastro pelo site"
+//   1 a visitor opens /cadastro, fills the form and lands on /painel, signed in
+//   2 on another device the same person logs in with the new password
+//   3 the admin sees the notice and the new client marked "Cadastro pelo site"
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -51,7 +49,6 @@ const browser = await launch({ headless: !argv.includes("--headed") });
 const devdb = await openDevDb(devDatabaseUrl(opt("db", null)));
 const pages = {};
 let shotNo = 0;
-const S = {};
 
 async function pageFor(role) {
   if (pages[role]) return pages[role];
@@ -68,7 +65,7 @@ async function shot(page, name, opts) {
 const steps = [];
 const step = (id, title, fn) => steps.push({ id, title, fn });
 
-step("form", "Visitante preenche o cadastro e é orientado a confirmar o e-mail", async () => {
+step("form", "Visitante cria a conta e entra direto na área do cliente", async () => {
   const visitor = await pageFor("visitor");
   await visitor.goto("/cadastro");
   await visitor.waitText("Crie o acesso da sua");
@@ -83,39 +80,22 @@ step("form", "Visitante preenche o cadastro e é orientado a confirmar o e-mail"
   await visitor.check(/Concordo que a Metta use estes dados/);
   await shot(visitor, "cadastro-preenchido", { full: true });
   await visitor.click("Criar conta", { role: "button" });
-  await visitor.waitText("Confira a sua caixa de entrada");
-  assert(await visitor.has(PERSON.email), "o e-mail do cadastro não aparece na confirmação");
-  await shot(visitor, "cadastro-enviado");
-  assert((await devdb.userStatus(PERSON.email)) === "pending", "o acesso deveria estar pendente");
-});
-
-step("pending-login", "Antes de confirmar, entrar explica que falta o e-mail", async () => {
-  const visitor = await pageFor("visitor");
-  await visitor.goto("/login");
-  await visitor.fill("E-mail", PERSON.email);
-  await visitor.fill("Senha", PERSON.password);
-  await visitor.allowing([{ status: 403, pattern: /^\/api\/auth\/login$/ }], async () => {
-    await visitor.click("Entrar", { role: "button" });
-    await visitor.waitText("Falta confirmar o seu e-mail");
-  });
-  assert(await visitor.has("Reenviar o link de confirmação"), "sem a opção de reenviar o link");
-  await shot(visitor, "login-pendente");
-});
-
-step("confirm", "O link do e-mail ativa o acesso e leva ao painel", async () => {
-  const mail = await devdb.lastEmail(PERSON.email);
-  const token = /\/confirmar-email\/([A-Za-z0-9_-]+)/.exec(mail?.text_body ?? "")?.[1];
-  assert(token, "o link de confirmação não está na caixa de saída");
-  const visitor = await pageFor("visitor");
-  await visitor.goto(`/confirmar-email/${token}`);
-  await visitor.waitText("Confirme o seu");
-  assert(await visitor.has(PERSON.company), "a empresa não aparece na confirmação");
-  await shot(visitor, "confirmar-email");
-  await visitor.click("Confirmar e entrar", { role: "button" });
-  await visitor.waitFor(() => location.pathname.startsWith("/painel"), { message: "não chegou ao painel" });
+  await visitor.waitFor(() => location.pathname.startsWith("/painel"), { message: "não chegou à área do cliente" });
   await visitor.waitIdle();
+  await visitor.waitText(PERSON.company);
   await shot(visitor, "painel-novo-cliente", { full: true });
   assert((await devdb.userStatus(PERSON.email)) === "active", "o acesso deveria estar ativo");
+});
+
+step("login", "Em outro aparelho, a pessoa entra com a senha criada", async () => {
+  const returning = await pageFor("returning");
+  await returning.goto("/login");
+  await returning.fill("E-mail", PERSON.email);
+  await returning.fill("Senha", PERSON.password);
+  await returning.click("Entrar", { role: "button" });
+  await returning.waitFor(() => location.pathname.startsWith("/painel"), { message: "o login não abriu a área do cliente" });
+  await returning.waitIdle();
+  await shot(returning, "login-novo-cliente");
 });
 
 step("admin", "A equipe vê o aviso e o cliente marcado como cadastro pelo site", async () => {

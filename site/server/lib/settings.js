@@ -6,7 +6,7 @@ export const DEFAULT_SETTINGS = {
   supportEmail: "suporte@mettamkt.com.br",
   defaultNotifyEmail: true,
   zipRetentionHours: 24,
-  // /cadastro accepts new client accounts (confirmed by e-mail)
+  // /cadastro accepts new client accounts
   signupEnabled: true,
 };
 

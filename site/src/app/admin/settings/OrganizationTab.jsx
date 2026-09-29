@@ -112,7 +112,7 @@ export default function OrganizationTab() {
       <Panel eyebrow="Acesso" title="Cadastro pelo site" index={3}>
         <Switch
           label="Cadastro aberto"
-          description="Qualquer pessoa pode criar a conta da empresa em /cadastro. O acesso só é ativado depois que ela confirma o e-mail (é preciso o SMTP configurado em Integrações), e cada novo cadastro chega às notificações dos administradores. Desligado, a página explica que o acesso é por convite."
+          description="Qualquer pessoa pode criar a conta da empresa em /cadastro e já entra na área do cliente. Cada novo cadastro chega às notificações dos administradores. Desligado, a página explica que o acesso é por convite."
           checked={form.signupEnabled}
           onCheckedChange={set("signupEnabled")}
         />

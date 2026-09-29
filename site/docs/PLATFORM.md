@@ -123,15 +123,14 @@ portal.access
 - **Cadastro pelo site** (`/cadastro`, `routes/signup.js`), aberto enquanto
   `signupEnabled` estiver ligado em Configurações › Organização: a pessoa cria a empresa
   (`clients.source = 'signup'`, sem marcas nem gestores) e o próprio acesso (`client`,
-  `pending`), com aceite LGPD (`users.terms_accepted_at`). O acesso só funciona depois do
-  link `/confirmar-email/:token` (48 h, uso único; a página confere o link e ativa pelo
-  botão, nunca ao abrir). Na confirmação, a pessoa entra e os administradores recebem o
-  aviso `client.signed_up`; a equipe então cria marcas, gestores, pedidos ou planos.
-- Proteções do cadastro: respostas iguais para e-mail novo ou já cadastrado (o dono de uma
-  conta existente recebe um aviso de tentativa), campo-armadilha para robôs, limite por IP
-  e reenvio de link no máximo a cada minuto. Sem SMTP, o link fica só na caixa de saída
-  (Configurações › E-mails, com o link oculto) — em produção, configure o SMTP antes de
-  abrir o cadastro.
+  ativo na hora), com aceite LGPD (`users.terms_accepted_at`). Não há confirmação por
+  e-mail nem dependência de SMTP: ela já entra na área do cliente, os administradores
+  recebem o aviso `client.signed_up` e a equipe então cria marcas, gestores, pedidos ou
+  planos.
+- Proteções do cadastro: campo-armadilha para robôs, limite por IP e senha com as mesmas
+  regras do convite. Um e-mail que já tem acesso é recusado com orientação para entrar ou
+  recuperar a senha (sem a confirmação por e-mail, o cadastro não consegue esconder que o
+  e-mail existe).
 
 ## 3. Estados — não confundir
 
@@ -173,7 +172,7 @@ Versões (`material_versions.status`): `draft`, `internal_review`, `released`,
 | `time.js`        | `now()` ISO, helpers de data. |
 | `errors.js`      | `HttpError(status, code, message, fields?)`, atalhos `notFound()`, `forbidden()`, `badRequest()`, `conflict()`, `validation(fields)`; middleware de erro que responde `{error:{code,message,fields?}}` e nunca vaza stack em produção. |
 | `validate.js`    | zod + `parse(schema, data)` → lança `validation` com campos em pt-BR. |
-| `auth.js`        | hash scrypt (`scrypt$N$r$p$salt$hash`), sessões (cookie `metta_sid` httpOnly, SameSite=Lax, Secure em produção, 14 dias deslizantes, token guardado como sha256), tokens de convite/redefinição/confirmação de e-mail (`issueToken(ctx, userId, 'invite'|'reset'|'verify', ttlHours)`), rate limit de login (5 falhas por e-mail+IP desde o último sucesso + 30/15 min por IP), middleware `requireAuth`, `requireRole(...roles)`, `requireCap(...caps)` (passa com **qualquer** uma), `requireStaff`, `requireClient`. |
+| `auth.js`        | hash scrypt (`scrypt$N$r$p$salt$hash`), sessões (cookie `metta_sid` httpOnly, SameSite=Lax, Secure em produção, 14 dias deslizantes, token guardado como sha256), tokens de convite/redefinição (`issueToken(ctx, userId, 'invite'|'reset', ttlHours)`), rate limit de login (5 falhas por e-mail+IP desde o último sucesso + 30/15 min por IP), middleware `requireAuth`, `requireRole(...roles)`, `requireCap(...caps)` (passa com **qualquer** uma), `requireStaff`, `requireClient`. |
 | `csrf.js`        | **Toda** requisição que altera estado (qualquer método fora GET/HEAD/OPTIONS, em qualquer caminho) exige header `X-Metta-Request: 1` e `Origin` compatível quando presente. Única exceção: `POST /api/webhooks/mercadopago` (casamento exato, sem diferenciar maiúsculas), que valida a assinatura. `app.js` responde 404 a prefixos `/API`, `/Dl`… (o roteamento do Express não diferencia maiúsculas) e aplica `Cache-Control: no-store` a `/api` e `/dl` em qualquer grafia. |
 | `permissions.js` | Mapa papel → capacidades; `can(user, cap)`, `capabilitiesFor(role)`. |
 | `access.js`      | Escopo (aceitam `req`): `getScope(req)`; `assertClient`, `assertBrand`, `assertProject`, `assertMaterial(req, id, {write})`, `assertVersion(req, id, {write})` (linha + `.material` não enumerável), `assertFile(req, id, {download, write})` (linha + `.version` e `.material`; `download` aplica 403 `download_disabled`/`font_license`) — retornam a linha ou lançam 404; `canWriteMaterial`, `clientCanSeeMaterial`, `clientCanSeeFile`, `downloadRule`; `scopeSql.clients|brands|projects|materials(req ou user, alias)` → `{sql, params}` para listas; `clientMaterialFilter`, `clientVersionFilter`, `clientFileFilter` com as regras do §2.4. |
@@ -289,8 +288,7 @@ Serviços de domínio compartilhados (`server/services`):
   produção (em desenvolvimento é gerado e salvo em `DATA_DIR/.secret`).
 - **Limites:** `MAX_UPLOAD_MB` (padrão 1024).
 - **Build servido:** `DIST_DIR` (padrão `dist/`). O servidor responde `/painel/*`, `/admin/*`,
-  `/convite/:token`, `/redefinir-senha/:token` e `/confirmar-email/:token` com o HTML da seção
-  (status 200).
+  `/convite/:token` e `/redefinir-senha/:token` com o HTML da seção (status 200).
 
 ### 6.1 Contratos com a AssinaVelox
 
@@ -384,9 +382,8 @@ Segue `DESIGN_SYSTEM.md`, adaptado à produtividade.
   no fim (`--auth ui` usa o formulário de login e o convite). Falha em erro de console,
   resposta 4xx/5xx inesperada ou rolagem horizontal. Detalhes no topo de `e2e/flows.mjs`.
 - Cadastro pelo site: `node e2e/signup.mjs --base http://127.0.0.1:5173 [--mobile] [--shots <pasta>]`
-  preenche `/cadastro`, confere a mensagem de e-mail pendente no login, abre o link de
-  confirmação lido da caixa de saída do banco de desenvolvimento, chega ao painel e confere o
-  aviso e a marcação "Cadastro pelo site" no painel da Metta.
+  preenche `/cadastro`, chega à área do cliente já conectado, entra de novo com a senha
+  criada em outra sessão e confere o aviso e a marcação "Cadastro pelo site" no painel da Metta.
 - Contratos com uma AssinaVelox real (local ou homologação):
   `node e2e/contracts.mjs --base http://127.0.0.1:5173 --av-log <laravel.log da AssinaVelox> [--mobile] [--shots <pasta>]`.
   A API precisa apontar para essa instância (`ASSINAVELOX_API_URL`, `ASSINAVELOX_TOKEN`), que deve

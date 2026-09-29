@@ -57,12 +57,6 @@ export const routes = {
       "Crie o acesso da sua empresa à área do cliente da Metta Marketing.",
     noindex: true,
   },
-  "/confirmar-email": {
-    title: "Confirmar e-mail | Metta Marketing",
-    description: "Confirme o seu e-mail para ativar o acesso à Metta.",
-    noindex: true,
-    prefix: true,
-  },
   "/painel": {
     title: "Área do cliente | Metta Marketing",
     description:
@@ -101,7 +95,7 @@ export const notFound = {
 
 // Product sub-routes (/painel/marca, /admin/clientes/:id, /convite/:token…)
 // share their section's metadata; all of them are noindex.
-const sections = ["/painel", "/admin", "/convite", "/redefinir-senha", "/confirmar-email"];
+const sections = ["/painel", "/admin", "/convite", "/redefinir-senha"];
 export const seoFor = (path) => {
   if (routes[path] && !routes[path].prefix) return routes[path];
   const section = sections.find((base) => path.startsWith(`${base}/`));

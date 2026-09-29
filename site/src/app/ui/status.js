@@ -128,7 +128,6 @@ export const STATUS = {
   },
   user: {
     invited: T("Convite enviado", "amber"),
-    pending: T("Confirmando e-mail", "amber"),
     active: T("Ativo", "olive"),
     disabled: T("Desativado", "neutral"),
   },

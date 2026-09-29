@@ -55,7 +55,7 @@ Títulos, descrições, canonical, Open Graph, Twitter e dados estruturados (JSO
 
 Início (`/`), A Metta (`/sobre`), Soluções (`/solucoes`), Método (`/metodo`), Planos (`/planos`) e Contato (`/contato`). A página inicial tem seis seções de tela cheia, com scroll por etapas, navegação por teclado e indicadores laterais. Em telas pequenas, conteúdo longo pode ser lido dentro da seção antes de avançar.
 
-Login (`/login`), cadastro pelo site (`/cadastro`, com confirmação do e-mail em `/confirmar-email/:token`), primeiro acesso por convite (`/convite/:token`), recuperação de senha (`/recuperar-senha`), área do cliente (`/painel/*`) e painel da Metta (`/admin/*`) pertencem à plataforma descrita acima. O cadastro pode ser fechado em Configurações › Organização; fechado, `/cadastro` explica que o acesso é por convite. O formulário comercial do site prepara uma mensagem `mailto:`; o usuário envia pelo próprio aplicativo de e-mail.
+Login (`/login`), cadastro pelo site (`/cadastro`, a pessoa já entra na área do cliente), primeiro acesso por convite (`/convite/:token`), recuperação de senha (`/recuperar-senha`), área do cliente (`/painel/*`) e painel da Metta (`/admin/*`) pertencem à plataforma descrita acima. O cadastro pode ser fechado em Configurações › Organização; fechado, `/cadastro` explica que o acesso é por convite. O formulário comercial do site prepara uma mensagem `mailto:`; o usuário envia pelo próprio aplicativo de e-mail.
 
 ## Estilo e continuidade
 

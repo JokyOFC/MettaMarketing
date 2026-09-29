@@ -6,7 +6,6 @@ import {
   LoginPage,
   ResetPasswordPage,
   SignupPage,
-  VerifyEmailPage,
 } from "../pages/AuthPages.jsx";
 import RequireAuth from "./auth/RequireAuth.jsx";
 import AppShell from "./shell/AppShell.jsx";
@@ -27,7 +26,6 @@ export const productRoutes = (
     <Route path="/login" element={<LoginPage />} />
     <Route path="/cadastro" element={<SignupPage />} />
     <Route path="/registro" element={<Navigate to="/cadastro" replace />} />
-    <Route path="/confirmar-email/:token" element={<VerifyEmailPage />} />
     <Route path="/convite/:token" element={<InvitePage />} />
     <Route path="/recuperar-senha" element={<ForgotPasswordPage />} />
     <Route path="/redefinir-senha/:token" element={<ResetPasswordPage />} />

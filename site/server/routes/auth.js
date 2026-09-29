@@ -74,10 +74,6 @@ export default function authRoutes(ctx) {
       await recordLoginAttempt(db, email, ip, false);
       throw new HttpError(401, "invalid_credentials", INVALID_CREDENTIALS);
     }
-    // Self sign-up waiting for the e-mail link (the password was right, so
-    // nothing is revealed to someone who does not know it).
-    if (user.status === "pending")
-      throw forbidden("Confirme seu e-mail para entrar: abra o link que enviamos quando você criou a conta.", "email_not_verified");
     if (user.status !== "active") {
       await recordLoginAttempt(db, email, ip, false);
       throw forbidden("Seu acesso está desativado. Fale com a equipe Metta.");
