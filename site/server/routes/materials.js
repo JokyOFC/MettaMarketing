@@ -125,9 +125,9 @@ const str = (value) => {
 };
 
 // Resolves a referenced record for a field; out-of-scope ids become a 422 on that field.
-function fieldRef(field, message, fn) {
+async function fieldRef(field, message, fn) {
   try {
-    return fn();
+    return await fn();
   } catch (err) {
     if (err instanceof HttpError && (err.status === 404 || err.status === 403)) throw validation({ [field]: message });
     throw err;
@@ -138,22 +138,22 @@ export default function materialsRoutes(ctx) {
   const router = Router();
   const { db } = ctx;
 
-  const currentVersion = (material) =>
-    material.current_version_id ? db.get("SELECT * FROM material_versions WHERE id = ?", [material.current_version_id]) : null;
+  const currentVersion = async (material) =>
+    material.current_version_id ? await db.get("SELECT * FROM material_versions WHERE id = ?", [material.current_version_id]) : null;
 
-  const activeCategory = (categoryId) => {
-    const row = db.get("SELECT * FROM categories WHERE id = ?", [categoryId]);
+  const activeCategory = async (categoryId) => {
+    const row = await db.get("SELECT * FROM categories WHERE id = ?", [categoryId]);
     if (!row || row.archived_at) throw validation({ categoryId: "Escolha uma categoria ativa." });
     return row;
   };
-  const staffMember = (userId, field = "ownerId") => {
-    const row = db.get("SELECT id, name FROM users WHERE id = ? AND role != 'client' AND status = 'active'", [userId]);
+  const staffMember = async (userId, field = "ownerId") => {
+    const row = await db.get("SELECT id, name FROM users WHERE id = ? AND role != 'client' AND status = 'active'", [userId]);
     if (!row) throw validation({ [field]: "Escolha alguém da equipe." });
     return row;
   };
   // Another primary in the same brand + category + variant slot.
-  const primaryTaken = (brandId, categoryId, variant, exceptId) =>
-    db.get(
+  const primaryTaken = async (brandId, categoryId, variant, exceptId) =>
+    await db.get(
       `SELECT id, title FROM materials WHERE brand_id = ? AND category_id = ? AND COALESCE(variant, '') = COALESCE(?, '')
          AND is_primary = 1 AND archived_at IS NULL AND id != ?`,
       [brandId, categoryId, variant ?? null, exceptId],
@@ -169,7 +169,7 @@ export default function materialsRoutes(ctx) {
    * Applies a metadata patch to a writable material (PATCH and bulk set_*).
    * -> list of changed field names.
    */
-  function updateMaterial(req, material, body) {
+  async function updateMaterial(req, material, body) {
     const user = req.user;
     const sets = [];
     const params = [];
@@ -189,7 +189,7 @@ export default function materialsRoutes(ctx) {
     if (body.tags !== undefined) set("tags", JSON.stringify([...new Set(body.tags)]), "tags");
     let categoryId = material.category_id;
     if (body.categoryId !== undefined && body.categoryId !== material.category_id) {
-      categoryId = activeCategory(body.categoryId).id;
+      categoryId = (await activeCategory(body.categoryId)).id;
       set("category_id", categoryId, "categoryId");
     }
     if (body.projectId !== undefined && body.projectId !== material.project_id) {
@@ -197,7 +197,7 @@ export default function materialsRoutes(ctx) {
         if (user.role === "designer") throw validation({ projectId: "Selecione um dos seus projetos." });
         set("project_id", null, "projectId");
       } else {
-        const project = fieldRef("projectId", "Projeto não encontrado.", () => assertProject(req, body.projectId));
+        const project = await fieldRef("projectId", "Projeto não encontrado.", () => assertProject(req, body.projectId));
         if (project.brand_id !== material.brand_id) throw validation({ projectId: "O projeto precisa ser da mesma marca." });
         set("project_id", project.id, "projectId");
       }
@@ -205,7 +205,7 @@ export default function materialsRoutes(ctx) {
     if (body.ownerId !== undefined && body.ownerId !== material.owner_id) {
       // the responsible person reads and writes the material: only staff
       // who already work on this client qualify (never an outsider)
-      if (body.ownerId !== null) assertAssignableOwner(req, material, body.ownerId);
+      if (body.ownerId !== null) await assertAssignableOwner(req, material, body.ownerId);
       set("owner_id", body.ownerId, "ownerId");
     }
     let variant = material.variant;
@@ -232,7 +232,7 @@ export default function materialsRoutes(ctx) {
     }
     // leaving a primary slot for one that is taken drops the primary mark
     if (material.is_primary === 1 && (categoryId !== material.category_id || variant !== material.variant)) {
-      if (primaryTaken(material.brand_id, categoryId, variant, material.id)) set("is_primary", 0, "isPrimary");
+      if (await primaryTaken(material.brand_id, categoryId, variant, material.id)) set("is_primary", 0, "isPrimary");
     }
     if (!sets.length) return [];
 
@@ -241,10 +241,10 @@ export default function materialsRoutes(ctx) {
     // fields share one internal "editou" entry.
     const title = body.title ?? material.title;
     const otherFields = changed.filter((field) => field !== "downloadEnabled");
-    db.tx(() => {
-      db.run(`UPDATE materials SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`, [...params, now(), material.id]);
+    await db.tx(async () => {
+      await db.run(`UPDATE materials SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`, [...params, now(), material.id]);
       if (otherFields.length)
-        logActivity(req, {
+        await logActivity(req, {
           action: "material.updated",
           entityType: "material",
           entityId: material.id,
@@ -253,7 +253,7 @@ export default function materialsRoutes(ctx) {
           data: { fields: otherFields },
         });
       if (downloadChanged !== null)
-        logActivity(req, {
+        await logActivity(req, {
           action: downloadChanged ? "material.download_enabled" : "material.download_disabled",
           entityType: "material",
           entityId: material.id,
@@ -266,24 +266,24 @@ export default function materialsRoutes(ctx) {
     return changed;
   }
 
-  function submitMaterial(req, material) {
+  async function submitMaterial(req, material) {
     assertEditable(material);
-    const version = currentVersion(material);
+    const version = await currentVersion(material);
     if (!version) throw conflict("Este material ainda não tem uma versão.");
     if (version.status === "internal_review") throw conflict("Esta versão já está em revisão interna.");
     if (version.status !== "draft")
       throw conflict("A versão atual já foi liberada. Crie uma nova versão para enviar à revisão.");
-    const count = db.get("SELECT COUNT(*) AS n FROM material_files WHERE version_id = ? AND role IN ('original', 'final')", [version.id]).n;
+    const count = (await db.get("SELECT COUNT(*) AS n FROM material_files WHERE version_id = ? AND role IN ('original', 'final')", [version.id])).n;
     if (!count) throw conflict("Anexe pelo menos um arquivo antes de enviar para revisão.");
     const at = now();
-    db.tx(() => {
-      db.run("UPDATE material_versions SET status = 'internal_review', submitted_at = ? WHERE id = ?", [at, version.id]);
-      db.run(
+    await db.tx(async () => {
+      await db.run("UPDATE material_versions SET status = 'internal_review', submitted_at = ? WHERE id = ?", [at, version.id]);
+      await db.run(
         `UPDATE materials SET visibility = CASE WHEN visibility = 'draft' THEN 'internal_review' ELSE visibility END,
            updated_at = ? WHERE id = ?`,
         [at, material.id],
       );
-      logActivity(req, {
+      await logActivity(req, {
         action: "material.submitted",
         entityType: "material",
         entityId: material.id,
@@ -291,9 +291,9 @@ export default function materialsRoutes(ctx) {
         summary: `${req.user.name} enviou a versão ${version.number} de ${quote(material.title)} para revisão interna.`,
         data: { versionId: version.id, versionNumber: version.number },
       });
-      let reviewers = managerIdsForClient(db, material.client_id);
-      if (!reviewers.length) reviewers = adminIds(db);
-      notify(req, reviewers, {
+      let reviewers = await managerIdsForClient(db, material.client_id);
+      if (!reviewers.length) reviewers = await adminIds(db);
+      await notify(req, reviewers, {
         type: "material.submitted",
         title: `${quote(material.title)} aguarda revisão`,
         body: `${req.user.name} enviou a versão ${version.number} para revisão interna.`,
@@ -304,16 +304,16 @@ export default function materialsRoutes(ctx) {
     });
   }
 
-  function setDownload(req, material, enabled) {
-    return updateMaterial(req, material, { downloadEnabled: enabled });
+  async function setDownload(req, material, enabled) {
+    return await updateMaterial(req, material, { downloadEnabled: enabled });
   }
 
-  function archiveMaterial(req, material) {
+  async function archiveMaterial(req, material) {
     if (material.archived_at) throw conflict("Este material já está arquivado.");
     const at = now();
-    db.tx(() => {
-      db.run("UPDATE materials SET archived_at = ?, archived_by = ?, updated_at = ? WHERE id = ?", [at, req.user.id, at, material.id]);
-      logActivity(req, {
+    await db.tx(async () => {
+      await db.run("UPDATE materials SET archived_at = ?, archived_by = ?, updated_at = ? WHERE id = ?", [at, req.user.id, at, material.id]);
+      await logActivity(req, {
         action: "material.archived",
         entityType: "material",
         entityId: material.id,
@@ -324,16 +324,16 @@ export default function materialsRoutes(ctx) {
     });
   }
 
-  function unarchiveMaterial(req, material) {
+  async function unarchiveMaterial(req, material) {
     if (!material.archived_at) throw conflict("Este material não está arquivado.");
     const at = now();
-    const clash = material.is_primary === 1 && primaryTaken(material.brand_id, material.category_id, material.variant, material.id);
-    db.tx(() => {
-      db.run(
+    const clash = material.is_primary === 1 && await primaryTaken(material.brand_id, material.category_id, material.variant, material.id);
+    await db.tx(async () => {
+      await db.run(
         `UPDATE materials SET archived_at = NULL, archived_by = NULL, is_primary = ?, updated_at = ? WHERE id = ?`,
         [clash ? 0 : material.is_primary, at, material.id],
       );
-      logActivity(req, {
+      await logActivity(req, {
         action: "material.unarchived",
         entityType: "material",
         entityId: material.id,
@@ -346,7 +346,7 @@ export default function materialsRoutes(ctx) {
 
   // ---------------------------------------------------------- list & create
 
-  router.get("/api/materials", requireAuth, requireCap(...VIEW), (req, res) => {
+  router.get("/api/materials", requireAuth, requireCap(...VIEW), async (req, res) => {
     const q = req.query;
     const filters = {
       brandId: str(q.brandId),
@@ -374,28 +374,28 @@ export default function materialsRoutes(ctx) {
       sort: str(q.sort),
     };
     const paging = q.page !== undefined || q.pageSize !== undefined ? paginate(q) : {};
-    res.json(listMaterials(req, filters, paging));
+    res.json(await listMaterials(req, filters, paging));
   });
 
-  router.post("/api/materials", requireAuth, requireCap("materials.upload"), (req, res) => {
+  router.post("/api/materials", requireAuth, requireCap("materials.upload"), async (req, res) => {
     const body = parse(createSchema, req.body);
-    const id = createMaterial(req, body);
-    res.status(201).json({ material: getMaterialDetail(req, id) });
+    const id = await createMaterial(req, body);
+    res.status(201).json({ material: await getMaterialDetail(req, id) });
   });
 
-  router.post("/api/materials/reorder", requireAuth, requireCap("materials.edit"), (req, res) => {
+  router.post("/api/materials/reorder", requireAuth, requireCap("materials.edit"), async (req, res) => {
     const { ids } = parse(z.object({ ids: z.array(id).min(1).max(1000) }), req.body);
     const unique = [...new Set(ids)];
-    const rows = unique.map((materialId) => assertMaterial(req, materialId, { write: true }));
+    const rows = [];
+    for (const materialId of unique) rows.push(await assertMaterial(req, materialId, { write: true }));
     const slot = `${rows[0].brand_id}:${rows[0].category_id}`;
     if (rows.some((row) => `${row.brand_id}:${row.category_id}` !== slot))
       throw validation({ ids: "Ordene materiais da mesma marca e categoria." });
     const at = now();
-    db.tx(() => {
-      unique.forEach((materialId, index) =>
-        db.run("UPDATE materials SET sort_order = ?, updated_at = ? WHERE id = ?", [(index + 1) * 10, at, materialId]),
-      );
-      logActivity(req, {
+    await db.tx(async () => {
+      for (const [index, materialId] of unique.entries())
+        await db.run("UPDATE materials SET sort_order = ?, updated_at = ? WHERE id = ?", [(index + 1) * 10, at, materialId]);
+      await logActivity(req, {
         action: "materials.reordered",
         entityType: "category",
         entityId: rows[0].category_id,
@@ -423,20 +423,20 @@ export default function materialsRoutes(ctx) {
     set_project: "materials.edit",
   };
 
-  router.post("/api/materials/bulk", requireAuth, requireCap("materials.edit", "materials.archive"), (req, res) => {
+  router.post("/api/materials/bulk", requireAuth, requireCap("materials.edit", "materials.archive"), async (req, res) => {
     const { ids, action, value } = parse(bulkSchema, req.body);
     if (!can(req.user, BULK_CAPS[action])) throw forbidden();
     // validate the shared value once
     if (action === "set_category") {
       if (typeof value !== "string") throw validation({ value: "Escolha uma categoria." });
-      activeCategory(value);
+      await activeCategory(value);
     }
     // set_owner: the person must be staff here; whether they may own each
     // material (access to its client) is checked per material and reported
     // in `skipped`
     if (action === "set_owner" && value !== null) {
       if (typeof value !== "string") throw validation({ value: "Escolha alguém da equipe." });
-      staffMember(value, "value");
+      await staffMember(value, "value");
     }
     if (action === "set_project" && value !== null && typeof value !== "string") throw validation({ value: "Escolha um projeto." });
 
@@ -445,22 +445,22 @@ export default function materialsRoutes(ctx) {
     const skipped = [];
     for (const materialId of [...new Set(ids)]) {
       try {
-        const material = assertMaterial(req, materialId, { write: true });
-        db.tx(() => {
+        const material = await assertMaterial(req, materialId, { write: true });
+        await db.tx(async () => {
           switch (action) {
             case "archive":
-              archiveMaterial(req, material);
+              await archiveMaterial(req, material);
               break;
             case "unarchive":
-              unarchiveMaterial(req, material);
+              await unarchiveMaterial(req, material);
               break;
             case "submit":
-              submitMaterial(req, material);
+              await submitMaterial(req, material);
               break;
             case "enable_download":
             case "disable_download": {
               assertEditable(material);
-              const changed = setDownload(req, material, action === "enable_download");
+              const changed = await setDownload(req, material, action === "enable_download");
               if (!changed.length) throw conflict(action === "enable_download" ? "O download já está liberado." : "O download já está desativado.");
               break;
             }
@@ -469,7 +469,7 @@ export default function materialsRoutes(ctx) {
             case "set_project": {
               assertEditable(material);
               const field = { set_category: "categoryId", set_owner: "ownerId", set_project: "projectId" }[action];
-              const changed = updateMaterial(req, material, { [field]: value });
+              const changed = await updateMaterial(req, material, { [field]: value });
               if (!changed.length) throw conflict("Nada a alterar.");
               break;
             }
@@ -497,45 +497,45 @@ export default function materialsRoutes(ctx) {
 
   // ---------------------------------------------------------- one material
 
-  router.get("/api/materials/:id", requireAuth, requireCap(...VIEW), (req, res) => {
-    res.json({ material: getMaterialDetail(req, req.params.id) });
+  router.get("/api/materials/:id", requireAuth, requireCap(...VIEW), async (req, res) => {
+    res.json({ material: await getMaterialDetail(req, req.params.id) });
   });
 
-  router.patch("/api/materials/:id", requireAuth, requireCap("materials.edit"), (req, res) => {
-    const material = assertMaterial(req, req.params.id, { write: true });
+  router.patch("/api/materials/:id", requireAuth, requireCap("materials.edit"), async (req, res) => {
+    const material = await assertMaterial(req, req.params.id, { write: true });
     assertEditable(material);
     const body = parse(patchSchema, req.body);
-    updateMaterial(req, material, body);
-    res.json({ material: getMaterialDetail(req, material.id) });
+    await updateMaterial(req, material, body);
+    res.json({ material: await getMaterialDetail(req, material.id) });
   });
 
-  router.post("/api/materials/:id/versions", requireAuth, requireCap("materials.upload"), (req, res) => {
+  router.post("/api/materials/:id/versions", requireAuth, requireCap("materials.upload"), async (req, res) => {
     const body = parse(versionCreateSchema, req.body);
-    const versionId = createVersion(req, req.params.id, body);
-    const material = getMaterialDetail(req, req.params.id);
+    const versionId = await createVersion(req, req.params.id, body);
+    const material = await getMaterialDetail(req, req.params.id);
     res.status(201).json({ version: material.versions.find((v) => v.id === versionId) ?? null, material });
   });
 
-  router.post("/api/materials/:id/submit", requireAuth, requireCap("materials.edit"), (req, res) => {
-    const material = assertMaterial(req, req.params.id, { write: true });
-    submitMaterial(req, material);
-    res.json({ material: getMaterialDetail(req, material.id) });
+  router.post("/api/materials/:id/submit", requireAuth, requireCap("materials.edit"), async (req, res) => {
+    const material = await assertMaterial(req, req.params.id, { write: true });
+    await submitMaterial(req, material);
+    res.json({ material: await getMaterialDetail(req, material.id) });
   });
 
-  router.post("/api/materials/:id/primary", requireAuth, requireCap("materials.edit"), (req, res) => {
+  router.post("/api/materials/:id/primary", requireAuth, requireCap("materials.edit"), async (req, res) => {
     const { primary } = parse(z.object({ primary: z.boolean().default(true) }), req.body ?? {});
-    const material = assertMaterial(req, req.params.id, { write: true });
+    const material = await assertMaterial(req, req.params.id, { write: true });
     assertEditable(material);
     let previous = null;
-    db.tx(() => {
+    await db.tx(async () => {
       if (primary) {
-        previous = primaryTaken(material.brand_id, material.category_id, material.variant, material.id) ?? null;
-        if (previous) db.run("UPDATE materials SET is_primary = 0, updated_at = ? WHERE id = ?", [now(), previous.id]);
-        db.run("UPDATE materials SET is_primary = 1, updated_at = ? WHERE id = ?", [now(), material.id]);
+        previous = await primaryTaken(material.brand_id, material.category_id, material.variant, material.id) ?? null;
+        if (previous) await db.run("UPDATE materials SET is_primary = 0, updated_at = ? WHERE id = ?", [now(), previous.id]);
+        await db.run("UPDATE materials SET is_primary = 1, updated_at = ? WHERE id = ?", [now(), material.id]);
       } else {
-        db.run("UPDATE materials SET is_primary = 0, updated_at = ? WHERE id = ?", [now(), material.id]);
+        await db.run("UPDATE materials SET is_primary = 0, updated_at = ? WHERE id = ?", [now(), material.id]);
       }
-      logActivity(req, {
+      await logActivity(req, {
         action: primary ? "material.primary_set" : "material.primary_unset",
         entityType: "material",
         entityId: material.id,
@@ -546,39 +546,39 @@ export default function materialsRoutes(ctx) {
         data: { previousId: previous?.id ?? null, variant: material.variant ?? null },
       });
     });
-    res.json({ material: getMaterialDetail(req, material.id), previousId: previous?.id ?? null });
+    res.json({ material: await getMaterialDetail(req, material.id), previousId: previous?.id ?? null });
   });
 
-  router.post("/api/materials/:id/archive", requireAuth, requireCap("materials.archive"), (req, res) => {
-    const material = assertMaterial(req, req.params.id, { write: true });
-    archiveMaterial(req, material);
-    res.json({ material: getMaterialDetail(req, material.id) });
+  router.post("/api/materials/:id/archive", requireAuth, requireCap("materials.archive"), async (req, res) => {
+    const material = await assertMaterial(req, req.params.id, { write: true });
+    await archiveMaterial(req, material);
+    res.json({ material: await getMaterialDetail(req, material.id) });
   });
 
-  router.post("/api/materials/:id/unarchive", requireAuth, requireCap("materials.archive"), (req, res) => {
-    const material = assertMaterial(req, req.params.id, { write: true });
-    unarchiveMaterial(req, material);
-    res.json({ material: getMaterialDetail(req, material.id) });
+  router.post("/api/materials/:id/unarchive", requireAuth, requireCap("materials.archive"), async (req, res) => {
+    const material = await assertMaterial(req, req.params.id, { write: true });
+    await unarchiveMaterial(req, material);
+    res.json({ material: await getMaterialDetail(req, material.id) });
   });
 
-  router.post("/api/materials/:id/deliver", requireAuth, requireCap("materials.release"), (req, res) => {
+  router.post("/api/materials/:id/deliver", requireAuth, requireCap("materials.release"), async (req, res) => {
     const body = parse(deliverSchema, req.body ?? {});
-    const result = deliverMaterial(req, req.params.id, body);
-    res.json({ ...result, material: getMaterialDetail(req, req.params.id) });
+    const result = await deliverMaterial(req, req.params.id, body);
+    res.json({ ...result, material: await getMaterialDetail(req, req.params.id) });
   });
 
   // History. Staff: every activity entry, versions, releases and downloads
   // (downloads are access records and never mean approval). Clients: only
   // the entries marked visible to them.
-  router.get("/api/materials/:id/history", requireAuth, requireCap(...VIEW), (req, res) => {
-    const material = assertMaterial(req, req.params.id);
+  router.get("/api/materials/:id/history", requireAuth, requireCap(...VIEW), async (req, res) => {
+    const material = await assertMaterial(req, req.params.id);
     const staff = isStaff(req);
-    const activity = db
+    const activity = (await db
       .all(
         `${ACTIVITY_SELECT} WHERE a.material_id = ? ${staff ? "" : "AND a.visibility = 'client'"}
           ORDER BY a.created_at DESC, a.id DESC LIMIT 500`,
         [material.id],
-      )
+      ))
       .map((row) => serializeActivity(req, row));
     if (!staff) {
       res.json({ items: activity.map((entry) => ({ type: "activity", ...entry })) });
@@ -586,7 +586,7 @@ export default function materialsRoutes(ctx) {
     }
 
     const person = (idValue, name, role) => (idValue ? personRef(req, { id: idValue, name: name ?? "Usuário removido", role }) : null);
-    const versions = db
+    const versions = (await db
       .all(
         `SELECT v.*, cu.name AS created_by_name, cu.role AS created_by_role, ru.name AS released_by_name, ru.role AS released_by_role,
             du.name AS decided_by_name, du.role AS decided_by_role,
@@ -597,7 +597,7 @@ export default function materialsRoutes(ctx) {
            LEFT JOIN users du ON du.id = v.decided_by
           WHERE v.material_id = ? ORDER BY v.number DESC`,
         [material.id],
-      )
+      ))
       .map((v) => ({
         id: v.id,
         number: v.number,
@@ -612,7 +612,7 @@ export default function materialsRoutes(ctx) {
         decidedAt: v.decided_at ?? null,
         decidedBy: person(v.decided_by, v.decided_by_name, v.decided_by_role),
       }));
-    const releases = db
+    const releases = (await db
       .all(
         `SELECT r.*, ri.version_id, ri.download_enabled AS item_download, v.number AS version_number,
             u.name AS actor_name, u.role AS actor_role, k.name AS kit_name
@@ -623,7 +623,7 @@ export default function materialsRoutes(ctx) {
            LEFT JOIN kits k ON k.id = r.kit_id
           WHERE ri.material_id = ? ORDER BY r.created_at DESC`,
         [material.id],
-      )
+      ))
       .map((r) => ({
         id: r.id,
         createdAt: r.created_at,
@@ -636,7 +636,7 @@ export default function materialsRoutes(ctx) {
         message: r.message ?? null,
         kit: r.kit_id ? { id: r.kit_id, name: r.kit_name ?? null } : null,
       }));
-    const downloads = db
+    const downloads = (await db
       .all(
         `SELECT d.*, u.name AS user_name, u.role AS user_role, f.display_name AS file_name, v.number AS version_number,
             z.label AS zip_label
@@ -646,10 +646,10 @@ export default function materialsRoutes(ctx) {
            LEFT JOIN material_versions v ON v.id = d.version_id
            LEFT JOIN zip_jobs z ON z.id = d.zip_job_id
           WHERE d.material_id = ?
-             OR (d.kind = 'zip' AND d.zip_job_id IN (SELECT id FROM zip_jobs WHERE entries LIKE ? ESCAPE '\\'))
+             OR (d.kind = 'zip' AND d.zip_job_id IN (SELECT id FROM zip_jobs WHERE entries LIKE ?))
           ORDER BY d.created_at DESC LIMIT 500`,
         [material.id, `%"m":"${material.id.replace(/[\\%_]/g, (c) => `\\${c}`)}"%`],
-      )
+      ))
       .map((d) => ({
         id: d.id,
         kind: d.kind,
@@ -681,19 +681,19 @@ export default function materialsRoutes(ctx) {
 
   // ---------------------------------------------------------- versions
 
-  router.get("/api/versions/:id", requireAuth, requireCap(...VIEW), (req, res) => {
-    const version = assertVersion(req, req.params.id);
-    res.json({ version: serializeVersion(req, version, null, null, version.material) });
+  router.get("/api/versions/:id", requireAuth, requireCap(...VIEW), async (req, res) => {
+    const version = await assertVersion(req, req.params.id);
+    res.json({ version: await serializeVersion(req, version, null, null, version.material) });
   });
 
-  router.patch("/api/versions/:id", requireAuth, requireCap("materials.edit"), (req, res) => {
-    const version = assertVersion(req, req.params.id, { write: true });
+  router.patch("/api/versions/:id", requireAuth, requireCap("materials.edit"), async (req, res) => {
+    const version = await assertVersion(req, req.params.id, { write: true });
     const material = version.material;
     assertEditable(material);
     if (version.status !== "draft" && version.status !== "internal_review")
       throw conflict("Só é possível editar versões em rascunho ou em revisão interna.");
     const body = parse(versionPatchSchema, req.body);
-    const rows = db.all("SELECT * FROM material_files WHERE version_id = ?", [version.id]);
+    const rows = await db.all("SELECT * FROM material_files WHERE version_id = ?", [version.id]);
     const byId = new Map(rows.map((row) => [row.id, row]));
     const fields = {};
     (body.files ?? []).forEach((item, index) => {
@@ -717,8 +717,8 @@ export default function materialsRoutes(ctx) {
         params.push(body[key]);
       }
     const at = now();
-    db.tx(() => {
-      if (sets.length) db.run(`UPDATE material_versions SET ${sets.join(", ")} WHERE id = ?`, [...params, version.id]);
+    await db.tx(async () => {
+      if (sets.length) await db.run(`UPDATE material_versions SET ${sets.join(", ")} WHERE id = ?`, [...params, version.id]);
       if (body.files?.length) {
         const order = new Map(body.files.map((item, index) => [item.id, index]));
         for (const item of body.files) {
@@ -739,13 +739,12 @@ export default function materialsRoutes(ctx) {
               (order.get(a.id) ?? Infinity) - (order.get(b.id) ?? Infinity) ||
               String(a.created_at).localeCompare(String(b.created_at)),
           );
-          group.forEach((row, index) =>
-            db.run("UPDATE material_files SET role = ?, position = ? WHERE id = ?", [row.role, index + 1, row.id]),
-          );
+          for (const [index, row] of group.entries())
+            await db.run("UPDATE material_files SET role = ?, position = ? WHERE id = ?", [row.role, index + 1, row.id]);
         }
       }
-      db.run("UPDATE materials SET updated_at = ? WHERE id = ?", [at, material.id]);
-      logActivity(req, {
+      await db.run("UPDATE materials SET updated_at = ? WHERE id = ?", [at, material.id]);
+      await logActivity(req, {
         action: "version.updated",
         entityType: "version",
         entityId: version.id,
@@ -756,12 +755,12 @@ export default function materialsRoutes(ctx) {
         data: { fields: Object.keys(body).filter((key) => body[key] !== undefined) },
       });
     });
-    const fresh = db.get("SELECT * FROM material_versions WHERE id = ?", [version.id]);
-    res.json({ version: serializeVersion(req, fresh, null, null, material), material: getMaterialDetail(req, material.id) });
+    const fresh = await db.get("SELECT * FROM material_versions WHERE id = ?", [version.id]);
+    res.json({ version: await serializeVersion(req, fresh, null, null, material), material: await getMaterialDetail(req, material.id) });
   });
 
-  router.post("/api/versions/:id/files", requireAuth, requireCap("materials.upload"), (req, res) => {
-    const version = assertVersion(req, req.params.id, { write: true });
+  router.post("/api/versions/:id/files", requireAuth, requireCap("materials.upload"), async (req, res) => {
+    const version = await assertVersion(req, req.params.id, { write: true });
     const material = version.material;
     assertEditable(material);
     const body = parse(z.object({ files: files.min(1, "Envie pelo menos um arquivo.") }), req.body);
@@ -770,8 +769,8 @@ export default function materialsRoutes(ctx) {
     const released = Boolean(version.released_at);
     if (released && body.files.some((file) => file.role !== "final"))
       throw validation({ files: "Depois da liberação, só é possível anexar arquivos finais a esta versão." });
-    const fileIds = attachUploads(req, { materialId: material.id, versionId: version.id, files: body.files, published: !released });
-    logActivity(req, {
+    const fileIds = await attachUploads(req, { materialId: material.id, versionId: version.id, files: body.files, published: !released });
+    await logActivity(req, {
       action: released ? "version.finals_added" : "version.files_added",
       entityType: "version",
       entityId: version.id,
@@ -781,27 +780,27 @@ export default function materialsRoutes(ctx) {
         : `${req.user.name} anexou ${fileIds.length} ${fileIds.length === 1 ? "arquivo" : "arquivos"} à versão ${version.number} de ${quote(material.title)}.`,
       data: { fileIds, published: !released },
     });
-    const fresh = db.get("SELECT * FROM material_versions WHERE id = ?", [version.id]);
+    const fresh = await db.get("SELECT * FROM material_versions WHERE id = ?", [version.id]);
     res.status(201).json({
       fileIds,
-      version: serializeVersion(req, fresh, null, null, material),
-      material: getMaterialDetail(req, material.id),
+      version: await serializeVersion(req, fresh, null, null, material),
+      material: await getMaterialDetail(req, material.id),
     });
   });
 
   // Files of released versions stay in the history; finals still waiting for
   // delivery can be removed.
   router.delete("/api/files/:id", requireAuth, requireCap("materials.edit"), async (req, res) => {
-    const file = assertFile(req, req.params.id, { write: true });
+    const file = await assertFile(req, req.params.id, { write: true });
     const { version, material } = file;
     assertEditable(material);
     if (version.released_at && isPublished(file))
       throw conflict("Arquivos de versões liberadas ficam preservados no histórico.");
-    const keys = [file.storage_key, ...db.all("SELECT storage_key FROM file_renditions WHERE file_id = ?", [file.id]).map((r) => r.storage_key)];
-    db.tx(() => {
-      db.run("DELETE FROM material_files WHERE id = ?", [file.id]);
-      db.run("UPDATE materials SET updated_at = ? WHERE id = ?", [now(), material.id]);
-      logActivity(req, {
+    const keys = [file.storage_key, ...(await db.all("SELECT storage_key FROM file_renditions WHERE file_id = ?", [file.id])).map((r) => r.storage_key)];
+    await db.tx(async () => {
+      await db.run("DELETE FROM material_files WHERE id = ?", [file.id]);
+      await db.run("UPDATE materials SET updated_at = ? WHERE id = ?", [now(), material.id]);
+      await logActivity(req, {
         action: "file.deleted",
         entityType: "file",
         entityId: file.id,

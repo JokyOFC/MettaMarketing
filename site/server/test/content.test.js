@@ -22,16 +22,16 @@ const f = {};
 const as = {};
 
 // Simulates a release (slice A owns /api/releases): version and material go live.
-function release(materialId) {
+async function release(materialId) {
   const db = ctx.db;
-  const material = db.get("SELECT * FROM materials WHERE id = ?", [materialId]);
+  const material = await db.get("SELECT * FROM materials WHERE id = ?", [materialId]);
   const at = now();
-  db.run("UPDATE material_versions SET status = 'released', released_at = ?, released_by = ? WHERE id = ?", [
+  await db.run("UPDATE material_versions SET status = 'released', released_at = ?, released_by = ? WHERE id = ?", [
     at,
     u.manager.id,
     material.current_version_id,
   ]);
-  db.run(
+  await db.run(
     `UPDATE materials SET visibility = 'released', released_version_id = current_version_id, released_at = ?,
        approval_status = CASE WHEN requires_approval = 1 THEN 'pending' ELSE 'none' END WHERE id = ?`,
     [at, materialId],
@@ -48,8 +48,8 @@ async function uploads(user, count) {
 before(async () => {
   server = await startTestServer();
   ctx = server.ctx;
-  const a = createClientWithBrand(ctx, { name: "Cliente A", brandName: "Marca A" });
-  const b = createClientWithBrand(ctx, { name: "Cliente B", brandName: "Marca B" });
+  const a = await createClientWithBrand(ctx, { name: "Cliente A", brandName: "Marca A" });
+  const b = await createClientWithBrand(ctx, { name: "Cliente B", brandName: "Marca B" });
   Object.assign(f, { clientA: a.clientId, brandA: a.brandId, clientB: b.clientId, brandB: b.brandId });
 
   u.admin = await createUser(ctx, { role: "admin", name: "Admin" });
@@ -60,9 +60,9 @@ before(async () => {
   u.finance = await createUser(ctx, { role: "finance" });
   u.clientA = await createUser(ctx, { role: "client", clientId: a.clientId, name: "Cliente Ana" });
   u.clientB = await createUser(ctx, { role: "client", clientId: b.clientId, name: "Cliente Bia" });
-  addStaffAccess(ctx, u.manager.id, a.clientId);
-  addStaffAccess(ctx, u.managerB.id, b.clientId);
-  f.project = createProject(ctx, { brandId: a.brandId, name: "Conteúdo mensal", memberIds: [u.designer.id] }).id;
+  await addStaffAccess(ctx, u.manager.id, a.clientId);
+  await addStaffAccess(ctx, u.managerB.id, b.clientId);
+  f.project = (await createProject(ctx, { brandId: a.brandId, name: "Conteúdo mensal", memberIds: [u.designer.id] })).id;
 
   for (const key of Object.keys(u)) as[key] = await login(server, { email: u[key].email });
 });
@@ -162,7 +162,7 @@ describe("posts", () => {
     assert.equal(before.body.items.length, 0);
     assert.equal((await as.clientA.get(`/api/content/${f.carousel}`)).status, 404);
 
-    release(f.carousel);
+    await release(f.carousel);
     const list = await as.clientA.get(`/api/content?brandId=${f.brandA}`);
     assert.equal(list.body.items.length, 1);
     const item = list.body.items[0];
@@ -273,9 +273,9 @@ describe("posts", () => {
     const client = await as.clientA.get(`/api/content/${f.carousel}`);
     assert.equal(client.body.material.post.publicationStatus, "published");
     assert.equal(client.body.material.post.publishedBy, undefined);
-    const note = ctx.db.get("SELECT * FROM notifications WHERE user_id = ? AND type = 'content.published'", [u.clientA.id]);
+    const note = await ctx.db.get("SELECT * FROM notifications WHERE user_id = ? AND type = 'content.published'", [u.clientA.id]);
     assert.ok(note);
-    const activity = ctx.db.get("SELECT * FROM activity_log WHERE material_id = ? AND action = 'content.published'", [f.carousel]);
+    const activity = await ctx.db.get("SELECT * FROM activity_log WHERE material_id = ? AND action = 'content.published'", [f.carousel]);
     assert.equal(activity.visibility, "client");
     assert.equal(JSON.parse(activity.data).manual, true);
 
@@ -299,7 +299,7 @@ describe("posts", () => {
       await as.manager.patch(`/api/content/${f.carousel}/publication`, { status: "not_scheduled" });
       const bulk = await as.manager.post("/api/content/bulk-publication", { ids: [f.carousel], status: "scheduled" });
       assert.deepEqual(bulk.body.ids, [f.carousel]);
-      const row = ctx.db.get("SELECT scheduled_at FROM post_details WHERE material_id = ?", [f.carousel]);
+      const row = await ctx.db.get("SELECT scheduled_at FROM post_details WHERE material_id = ?", [f.carousel]);
       // no time: noon in São Paulo
       assert.equal(row.scheduled_at, "2026-10-12T15:00:00.000Z");
       await as.manager.patch(`/api/content/${f.carousel}/publication`, { status: "not_scheduled" });
@@ -355,7 +355,7 @@ describe("posts", () => {
 
   test("delivery is its own axis and filter", async () => {
     const at = now();
-    ctx.db.run("UPDATE materials SET delivered_at = ? WHERE id = ?", [at, f.carousel]);
+    await ctx.db.run("UPDATE materials SET delivered_at = ? WHERE id = ?", [at, f.carousel]);
     const delivered = await as.manager.get(`/api/content?brandId=${f.brandA}&delivered=1`);
     assert.deepEqual(delivered.body.items.map((item) => item.id), [f.carousel]);
     assert.equal(delivered.body.items[0].deliveredAt, at);
@@ -366,7 +366,7 @@ describe("posts", () => {
     assert.deepEqual(client.body.items.map((item) => item.id), [f.carousel]);
     const calendar = await as.manager.get(`/api/content?view=calendar&from=2026-10-01&to=2026-10-31&delivered=0`);
     assert.equal(calendar.body.items.some((item) => item.id === f.carousel), false);
-    ctx.db.run("UPDATE materials SET delivered_at = NULL WHERE id = ?", [f.carousel]);
+    await ctx.db.run("UPDATE materials SET delivered_at = NULL WHERE id = ?", [f.carousel]);
   });
 
   test("bulk scheduling skips drafts and never publishes", async () => {
@@ -465,6 +465,6 @@ describe("options", () => {
     assert.equal(a.body.items.length, 0);
     const b = await as.clientB.get("/api/content");
     assert.deepEqual(b.body.items.map((item) => item.id), [material.id]);
-    assert.equal(categoryId(ctx, "posts-carrosseis"), material.category_id);
+    assert.equal(await categoryId(ctx, "posts-carrosseis"), material.category_id);
   });
 });

@@ -31,7 +31,7 @@ function workScope(req) {
   return scopeSql.materials(req, "m", "b");
 }
 
-const count = (db, sql, params) => db.get(sql, params).n;
+const count = async (db, sql, params) => (await db.get(sql, params)).n;
 const person = (id, name, role) => (id ? { id, name: name ?? "Usuário removido", role: role ?? null } : null);
 
 // A released version the client approved, or that needs no approval, is the
@@ -50,10 +50,10 @@ const TARGET_DATE = "COALESCE(m.due_date, pd.planned_date)";
  *   list once published (publishing itself is tracked in Conteúdo);
  * - projects with a deadline that are not delivered.
  */
-function upcomingDeliveries(req, today, horizon) {
+async function upcomingDeliveries(req, today, horizon) {
   const db = req.ctx.db;
   const scope = workScope(req);
-  const materialRows = db.all(
+  const materialRows = await db.all(
     `SELECT m.id, m.kind, m.title, m.due_date, m.visibility, m.approval_status, ${TARGET_DATE} AS target_date,
             pd.planned_date, pd.planned_time, pd.publication_status,
             b.id AS brand_id, b.name AS brand_name, cl.id AS client_id, cl.name AS client_name,
@@ -68,11 +68,11 @@ function upcomingDeliveries(req, today, horizon) {
         AND ${TARGET_DATE} IS NOT NULL AND ${TARGET_DATE} <= ?
         AND NOT ${ART_DONE}
         AND IFNULL(pd.publication_status, '') <> 'published'
-      ORDER BY target_date, m.title COLLATE NOCASE`,
+      ORDER BY target_date, m.title COLLATE utf8mb4_0900_ai_ci`,
     [...scope.params, horizon],
   );
   const projectScope = scopeSql.projects(req, "p");
-  const projectRows = db.all(
+  const projectRows = await db.all(
     `SELECT p.id, p.name, p.status, p.due_date, b.id AS brand_id, b.name AS brand_name, cl.id AS client_id, cl.name AS client_name,
             (SELECT u.id FROM project_members pm JOIN users u ON u.id = pm.user_id WHERE pm.project_id = p.id
               ORDER BY pm.role = 'lead' DESC, pm.added_at LIMIT 1) AS owner_id
@@ -81,13 +81,13 @@ function upcomingDeliveries(req, today, horizon) {
        JOIN clients cl ON cl.id = b.client_id
       WHERE p.due_date IS NOT NULL AND p.due_date <= ? AND p.delivered_at IS NULL
         AND p.status NOT IN ('delivered', 'archived') AND ${projectScope.sql}
-      ORDER BY p.due_date, p.name COLLATE NOCASE`,
+      ORDER BY p.due_date, p.name COLLATE utf8mb4_0900_ai_ci`,
     [horizon, ...projectScope.params],
   );
   const owners = new Map();
   for (const row of projectRows)
     if (row.owner_id && !owners.has(row.owner_id))
-      owners.set(row.owner_id, db.get("SELECT id, name, role FROM users WHERE id = ?", [row.owner_id]));
+      owners.set(row.owner_id, await db.get("SELECT id, name, role FROM users WHERE id = ?", [row.owner_id]));
 
   const items = [
     ...materialRows.map((row) => {
@@ -146,9 +146,9 @@ function upcomingDeliveries(req, today, horizon) {
   };
 }
 
-function myTasks(req, today) {
+async function myTasks(req, today) {
   const db = req.ctx.db;
-  const rows = db.all(
+  const rows = await db.all(
     `SELECT t.id, t.title, t.status, t.due_date, t.material_id, p.id AS project_id, p.name AS project_name,
             b.id AS brand_id, b.name AS brand_name, cl.id AS client_id, cl.name AS client_name
        FROM tasks t
@@ -176,7 +176,7 @@ function myTasks(req, today) {
   };
 }
 
-function adminOverview(req) {
+async function adminOverview(req) {
   const db = req.ctx.db;
   const user = req.user;
   const today = localToday();
@@ -206,17 +206,17 @@ function adminOverview(req) {
 
   if (can(user, "projects.view")) {
     const scope = scopeSql.projects(req, "p");
-    out.projectsInProgress = count(db, `SELECT COUNT(*) AS n FROM projects p WHERE p.status = 'in_progress' AND ${scope.sql}`, scope.params);
+    out.projectsInProgress = await count(db, `SELECT COUNT(*) AS n FROM projects p WHERE p.status = 'in_progress' AND ${scope.sql}`, scope.params);
   }
   if (seesMaterials || can(user, "projects.view")) {
-    const deliveries = upcomingDeliveries(req, today, horizon);
+    const deliveries = await upcomingDeliveries(req, today, horizon);
     out.upcomingDeliveries = deliveries.items;
     out.upcomingCount = deliveries.count;
     out.overdueCount = deliveries.overdueCount;
   }
   if (seesMaterials) {
     const scope = workScope(req);
-    const approvals = db.get(
+    const approvals = await db.get(
       `SELECT SUM(m.approval_status = 'pending') AS pending, SUM(m.approval_status = 'changes_requested') AS changes
          FROM materials m JOIN brands b ON b.id = m.brand_id
         WHERE m.visibility = 'released' AND m.archived_at IS NULL AND ${scope.sql}`,
@@ -225,7 +225,7 @@ function adminOverview(req) {
     out.pendingApprovals = approvals.pending ?? 0;
     out.changesRequested = approvals.changes ?? 0;
     if (can(user, "materials.release"))
-      out.awaitingRelease = count(
+      out.awaitingRelease = await count(
         db,
         `SELECT COUNT(*) AS n FROM materials m JOIN brands b ON b.id = m.brand_id
            LEFT JOIN material_versions cv ON cv.id = m.current_version_id
@@ -235,7 +235,7 @@ function adminOverview(req) {
   }
   if (can(user, "briefings.view")) {
     const scope = scopeSql.brands(req, "b");
-    out.briefingsAwaiting = count(
+    out.briefingsAwaiting = await count(
       db,
       `SELECT COUNT(*) AS n FROM briefings bf JOIN brands b ON b.id = bf.brand_id
         WHERE bf.status IN ('awaiting_client', 'in_progress') AND ${scope.sql}`,
@@ -246,13 +246,13 @@ function adminOverview(req) {
     const scope = scopeSql.clients(req, "cl");
     // Open = still owed: awaiting payment or rejected by Mercado Pago (the
     // client can try again), the same set commerce treats as receivable.
-    const orders = db.get(
+    const orders = await db.get(
       `SELECT COUNT(*) AS n, COALESCE(SUM(o.amount_cents), 0) AS cents, COALESCE(SUM(o.status = 'failed'), 0) AS failed
          FROM orders o JOIN clients cl ON cl.id = o.client_id
         WHERE o.status IN (${OPEN_ORDER_SQL}) AND ${scope.sql}`,
       scope.params,
     );
-    const subs = db.get(
+    const subs = await db.get(
       `SELECT COUNT(*) AS n, COALESCE(SUM(s.amount_cents), 0) AS cents FROM subscriptions s JOIN clients cl ON cl.id = s.client_id
         WHERE s.status = 'active' AND ${scope.sql}`,
       scope.params,
@@ -267,15 +267,15 @@ function adminOverview(req) {
     // Same source as the Histórico; of the downloads, only the clients' ones
     // (the team's own downloads are working noise here, still in the history).
     const scope = historyScope(req);
-    const rows = db.all(
+    const rows = await db.all(
       `SELECT ${ACTIVITY_COLUMNS} ${HISTORY_FROM} WHERE ${scope.sql} AND (a.src = 'log' OR a.actor_role = 'client')
         ORDER BY a.created_at DESC, a.id DESC LIMIT ${RECENT_ACTIVITY_LIMIT}`,
       scope.params,
     );
-    out.recentActivity = serializeActivities(req, rows);
+    out.recentActivity = await serializeActivities(req, rows);
   }
   if (can(user, "tasks.manage") || user.role === "designer") {
-    const tasks = myTasks(req, today);
+    const tasks = await myTasks(req, today);
     out.myTasks = tasks.items;
     out.myTasksTotal = tasks.total;
   }
@@ -295,12 +295,12 @@ function answered(value) {
   return String(value).trim() !== "";
 }
 
-function portalOverview(req, brandId) {
+async function portalOverview(req, brandId) {
   const db = req.ctx.db;
   const user = req.user;
   const today = localToday();
-  const brands = db
-    .all("SELECT id, name, slug, client_id FROM brands WHERE client_id = ? AND status = 'active' ORDER BY name COLLATE NOCASE", [user.client_id])
+  const brands = (await db
+    .all("SELECT id, name, slug, client_id FROM brands WHERE client_id = ? AND status = 'active' ORDER BY name COLLATE utf8mb4_0900_ai_ci", [user.client_id]))
     .map((row) => ({ id: row.id, name: row.name, slug: row.slug, clientId: row.client_id }));
 
   // Materials the client can see (released, not archived), optionally one brand.
@@ -311,22 +311,22 @@ function portalOverview(req, brandId) {
     baseParams.push(brandId);
   }
   const RELEASED_AT = "(SELECT released_at FROM material_versions WHERE id = m.released_version_id)";
-  const materials = (extra, order, limit, extraParams = []) =>
-    serializeMaterials(
+  const materials = async (extra, order, limit, extraParams = []) =>
+    await serializeMaterials(
       req,
-      db.all(`${MATERIAL_SELECT} WHERE ${[...base, ...extra].join(" AND ")} ORDER BY ${order} LIMIT ?`, [...baseParams, ...extraParams, limit]),
+      await db.all(`${MATERIAL_SELECT} WHERE ${[...base, ...extra].join(" AND ")} ORDER BY ${order} LIMIT ?`, [...baseParams, ...extraParams, limit]),
     );
-  const countWhere = (extra, extraParams = []) =>
-    count(
+  const countWhere = async (extra, extraParams = []) =>
+    await count(
       db,
       `SELECT COUNT(*) AS n FROM materials m JOIN brands b ON b.id = m.brand_id LEFT JOIN post_details pd ON pd.material_id = m.id
         WHERE ${[...base, ...extra].join(" AND ")}`,
       [...baseParams, ...extraParams],
     );
 
-  const pendingApprovals = materials(["m.approval_status = 'pending'"], `${RELEASED_AT} DESC, m.id`, 8);
-  const recentReleases = materials(["m.approval_status <> 'pending'"], `${RELEASED_AT} DESC, m.id`, 8);
-  const upcoming = materials(["m.kind = 'post'", "pd.planned_date >= ?"], "pd.planned_date, pd.planned_time, m.id", 6, [today]);
+  const pendingApprovals = await materials(["m.approval_status = 'pending'"], `${RELEASED_AT} DESC, m.id`, 8);
+  const recentReleases = await materials(["m.approval_status <> 'pending'"], `${RELEASED_AT} DESC, m.id`, 8);
+  const upcoming = await materials(["m.kind = 'post'", "pd.planned_date >= ?"], "pd.planned_date, pd.planned_time, m.id", 6, [today]);
 
   const briefingWhere = ["b.client_id = ?", "bf.status IN ('awaiting_client', 'in_progress')"];
   const briefingParams = [user.client_id];
@@ -334,7 +334,7 @@ function portalOverview(req, brandId) {
     briefingWhere.push("bf.brand_id = ?");
     briefingParams.push(brandId);
   }
-  const briefingRows = db.all(
+  const briefingRows = await db.all(
     `SELECT bf.id, bf.title, bf.status, bf.due_date, bf.sent_at, bf.questions, bf.answers, bf.updated_at, b.id AS brand_id, b.name AS brand_name
        FROM briefings bf JOIN brands b ON b.id = bf.brand_id
       WHERE ${briefingWhere.join(" AND ")}
@@ -363,7 +363,7 @@ function portalOverview(req, brandId) {
   });
 
   // Open orders: awaiting payment or rejected (still owed, "Tentar de novo").
-  const billing = db.get(
+  const billing = await db.get(
     `SELECT COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS cents, MIN(due_date) AS next_due,
             COALESCE(SUM(status = 'failed'), 0) AS failed, COALESCE(SUM(CASE WHEN status = 'failed' THEN amount_cents END), 0) AS failed_cents
        FROM orders WHERE client_id = ? AND status IN (${OPEN_ORDER_SQL})`,
@@ -377,7 +377,7 @@ function portalOverview(req, brandId) {
     activityWhere.push("(a.brand_id = ? OR a.brand_id IS NULL)");
     activityParams.push(brandId);
   }
-  const activityRows = db.all(
+  const activityRows = await db.all(
     `SELECT ${ACTIVITY_COLUMNS} ${ACTIVITY_FROM} WHERE ${activityWhere.join(" AND ")} ORDER BY a.created_at DESC, a.id DESC LIMIT 8`,
     activityParams,
   );
@@ -399,20 +399,20 @@ function portalOverview(req, brandId) {
     },
     // Contracts waiting for this client's signature (AssinaVelox).
     contracts: {
-      awaitingSignature: db.get(
+      awaitingSignature: (await db.get(
         "SELECT COUNT(*) AS n FROM contracts WHERE client_id = ? AND status = 'sent' AND COALESCE(client_status, 'pending') IN ('pending', 'notified', 'viewed')",
         [user.client_id],
-      ).n,
+      )).n,
     },
-    recentActivity: serializeActivities(req, activityRows),
+    recentActivity: await serializeActivities(req, activityRows),
     totals: {
-      released: countWhere([]),
-      pendingApprovals: countWhere(["m.approval_status = 'pending'"]),
-      changesRequested: countWhere(["m.approval_status = 'changes_requested'"]),
-      approved: countWhere(["m.approval_status = 'approved'"]),
+      released: await countWhere([]),
+      pendingApprovals: await countWhere(["m.approval_status = 'pending'"]),
+      changesRequested: await countWhere(["m.approval_status = 'changes_requested'"]),
+      approved: await countWhere(["m.approval_status = 'approved'"]),
       briefingsToFill: briefingsToFill.length,
-      upcoming: countWhere(["m.kind = 'post'", "pd.planned_date >= ?"], [today]),
-      activity: count(db, `SELECT COUNT(*) AS n FROM activity_log a WHERE ${scope.sql}`, scope.params),
+      upcoming: await countWhere(["m.kind = 'post'", "pd.planned_date >= ?"], [today]),
+      activity: await count(db, `SELECT COUNT(*) AS n FROM activity_log a WHERE ${scope.sql}`, scope.params),
     },
   };
 }
@@ -420,14 +420,14 @@ function portalOverview(req, brandId) {
 export default function overviewRoutes() {
   const router = Router();
 
-  router.get("/api/admin/overview", requireAuth, requireStaff, (req, res) => {
-    res.json(adminOverview(req));
+  router.get("/api/admin/overview", requireAuth, requireStaff, async (req, res) => {
+    res.json(await adminOverview(req));
   });
 
-  router.get("/api/portal/overview", requireAuth, requireCap("portal.access"), (req, res) => {
+  router.get("/api/portal/overview", requireAuth, requireCap("portal.access"), async (req, res) => {
     const { brandId } = parse(portalQuery, req.query);
-    if (brandId) assertBrand(req, brandId);
-    res.json(portalOverview(req, brandId ?? null));
+    if (brandId) await assertBrand(req, brandId);
+    res.json(await portalOverview(req, brandId ?? null));
   });
 
   return router;

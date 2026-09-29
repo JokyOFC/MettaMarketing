@@ -11,8 +11,8 @@ after(async () => {
   await server?.close();
 });
 
-const tokenFrom = (email, path) => {
-  const text = lastEmail(server.ctx, email)?.text_body ?? "";
+const tokenFrom = async (email, path) => {
+  const text = (await lastEmail(server.ctx, email))?.text_body ?? "";
   const match = new RegExp(`${path}/([A-Za-z0-9_-]+)`).exec(text);
   return match?.[1] ?? null;
 };
@@ -42,14 +42,14 @@ describe("login, me, logout", () => {
 
     // session token is stored hashed
     const token = agent.cookie.split("=")[1];
-    assert.equal(server.db.get("SELECT COUNT(*) AS n FROM sessions WHERE token_hash = ?", [token]).n, 0);
+    assert.equal((await server.db.get("SELECT COUNT(*) AS n FROM sessions WHERE token_hash = ?", [token])).n, 0);
 
     assert.equal((await agent.post("/api/auth/logout")).status, 204);
     assert.equal((await agent.get("/api/auth/me")).status, 401);
   });
 
   test("client /me lists its client and active brands", async () => {
-    const { clientId, brand } = createClientWithBrand(server.ctx, { name: "Cliente Um", brandName: "Marca Um" });
+    const { clientId, brand } = await createClientWithBrand(server.ctx, { name: "Cliente Um", brandName: "Marca Um" });
     const user = await createUser(server.ctx, { role: "client", clientId });
     const agent = await login(server, { email: user.email });
     assert.deepEqual(agent.user.client, { id: clientId, name: "Cliente Um" });
@@ -101,7 +101,7 @@ describe("login, me, logout", () => {
   test("disabling a user ends the current session", async () => {
     const user = await createUser(server.ctx, { role: "designer" });
     const agent = await login(server, { email: user.email });
-    server.db.run("UPDATE users SET status = 'disabled' WHERE id = ?", [user.id]);
+    await server.db.run("UPDATE users SET status = 'disabled' WHERE id = ?", [user.id]);
     assert.equal((await agent.get("/api/auth/me")).status, 401);
   });
 });
@@ -109,7 +109,7 @@ describe("login, me, logout", () => {
 describe("invitations", () => {
   test("accepting an invite sets the password and signs in", async () => {
     const user = await createUser(server.ctx, { role: "manager", status: "invited", name: "Convidada" });
-    const token = issueToken(server.ctx, user.id, "invite", 72);
+    const token = await issueToken(server.ctx, user.id, "invite", 72);
     const agent = createAgent(server);
 
     const peek = await agent.get(`/api/auth/invite/${token}`);
@@ -139,12 +139,12 @@ describe("invitations", () => {
 
   test("a new invite invalidates the previous link; expired links answer 410", async () => {
     const user = await createUser(server.ctx, { role: "designer", status: "invited" });
-    const first = issueToken(server.ctx, user.id, "invite", 72);
-    const second = issueToken(server.ctx, user.id, "invite", 72);
+    const first = await issueToken(server.ctx, user.id, "invite", 72);
+    const second = await issueToken(server.ctx, user.id, "invite", 72);
     assert.equal((await createAgent(server).get(`/api/auth/invite/${first}`)).status, 410);
     assert.equal((await createAgent(server).get(`/api/auth/invite/${second}`)).status, 200);
 
-    const stale = issueToken(server.ctx, user.id, "invite", -1);
+    const stale = await issueToken(server.ctx, user.id, "invite", -1);
     assert.equal((await createAgent(server).get(`/api/auth/invite/${stale}`)).status, 410);
     assert.equal((await createAgent(server).get("/api/auth/invite/nao-existe-este-token-aqui")).status, 410);
   });
@@ -157,13 +157,13 @@ describe("password reset and change", () => {
     const anon = createAgent(server);
 
     assert.equal((await anon.post("/api/auth/password/forgot", { email: "ninguem@example.test" })).status, 204);
-    assert.equal(lastEmail(server.ctx, "ninguem@example.test"), undefined);
+    assert.equal(await lastEmail(server.ctx, "ninguem@example.test"), undefined);
 
     assert.equal((await anon.post("/api/auth/password/forgot", { email: user.email })).status, 204);
-    const email = lastEmail(server.ctx, user.email);
+    const email = await lastEmail(server.ctx, user.email);
     assert.equal(email.status, "not_configured");
     assert.match(email.html_body, /redefinir-senha/);
-    const token = tokenFrom(user.email, "/redefinir-senha");
+    const token = await tokenFrom(user.email, "/redefinir-senha");
     assert.ok(token);
     assert.ok(email.text_body.startsWith("Redefinição de senha"));
 

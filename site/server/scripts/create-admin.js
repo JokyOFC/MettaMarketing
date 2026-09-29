@@ -33,21 +33,21 @@ try {
 }
 
 const config = loadConfig();
-const ctx = createContext(config, { jobs: false });
+const ctx = await createContext(config, { jobs: false });
 try {
-  if (ctx.db.get("SELECT id FROM users WHERE email = ?", [input.email]))
+  if (await ctx.db.get("SELECT id FROM users WHERE email = ?", [input.email]))
     fail(`Já existe um usuário com o e-mail ${input.email}. Nada foi alterado.`);
 
   const id = newId("usr");
   const at = now();
-  ctx.db.run(
+  await ctx.db.run(
     `INSERT INTO users (id, email, name, role, status, created_at, updated_at)
      VALUES (?, ?, ?, 'admin', 'invited', ?, ?)`,
     [id, input.email, input.name, at, at],
   );
-  const token = issueToken(ctx, id, "invite", INVITE_HOURS);
+  const token = await issueToken(ctx, id, "invite", INVITE_HOURS);
   const url = `${config.appUrl}/convite/${token}`;
-  logActivity(ctx, {
+  await logActivity(ctx, {
     action: "user.invited",
     entityType: "user",
     entityId: id,
@@ -69,5 +69,5 @@ try {
   console.log(`Link de convite (válido por ${INVITE_HOURS} h, uso único):\n${url}`);
 } finally {
   await ctx.mailer.idle();
-  ctx.db.close();
+  await ctx.db.close();
 }

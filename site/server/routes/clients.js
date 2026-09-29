@@ -172,37 +172,37 @@ function slugify(text) {
   );
 }
 
-function uniqueBrandSlug(db, clientId, name) {
+async function uniqueBrandSlug(db, clientId, name) {
   const base = slugify(name);
   let slug = base;
-  for (let n = 2; db.get("SELECT 1 AS yes FROM brands WHERE client_id = ? AND slug = ?", [clientId, slug]); n += 1) slug = `${base}-${n}`;
+  for (let n = 2; await db.get("SELECT 1 AS yes FROM brands WHERE client_id = ? AND slug = ?", [clientId, slug]); n += 1) slug = `${base}-${n}`;
   return slug;
 }
 
-function assertBrandName(db, clientId, name, exceptId = null) {
-  const clash = db.get("SELECT id FROM brands WHERE client_id = ? AND lower(name) = lower(?) AND id IS NOT ?", [clientId, name, exceptId]);
+async function assertBrandName(db, clientId, name, exceptId = null) {
+  const clash = await db.get("SELECT id FROM brands WHERE client_id = ? AND lower(name) = lower(?) AND NOT (id <=> ?)", [clientId, name, exceptId]);
   if (clash) throw validation({ name: "Este cliente já tem uma marca com este nome." });
 }
 
 // Guidelines sent on creation start as a draft: the client only reads them
 // after the identity release (lib/guidelines.js, D3).
-function insertBrand(req, clientId, input) {
+async function insertBrand(req, clientId, input) {
   const db = req.ctx.db;
   const id = newId("brd");
   const at = now();
-  db.run(
+  await db.run(
     `INSERT INTO brands (id, client_id, name, slug, description, internal_notes, status, created_by, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
-    [id, clientId, input.name, uniqueBrandSlug(db, clientId, input.name), input.description ?? null, input.internalNotes ?? null, req.user.id, at, at],
+    [id, clientId, input.name, await uniqueBrandSlug(db, clientId, input.name), input.description ?? null, input.internalNotes ?? null, req.user.id, at, at],
   );
   if (input.usageGuidelines || input.typographyGuidelines)
-    saveGuidelineDraft(
+    await saveGuidelineDraft(
       db,
-      db.get("SELECT * FROM brands WHERE id = ?", [id]),
+      await db.get("SELECT * FROM brands WHERE id = ?", [id]),
       { usage: input.usageGuidelines, typography: input.typographyGuidelines },
       { userId: req.user.id, at },
     );
-  logActivity(req, {
+  await logActivity(req, {
     action: "brand.created",
     entityType: "brand",
     entityId: id,
@@ -214,18 +214,18 @@ function insertBrand(req, clientId, input) {
   return id;
 }
 
-function insertClientUser(req, clientId, input) {
+async function insertClientUser(req, clientId, input) {
   const db = req.ctx.db;
-  if (db.get("SELECT id FROM users WHERE email = ?", [input.email]))
+  if (await db.get("SELECT id FROM users WHERE email = ?", [input.email]))
     throw validation({ email: "Já existe um acesso com este e-mail.", "user.email": "Já existe um acesso com este e-mail." });
   const id = newId("usr");
   const at = now();
-  db.run(
+  await db.run(
     `INSERT INTO users (id, email, name, role, client_id, status, notify_email, created_by, created_at, updated_at)
      VALUES (?, ?, ?, 'client', ?, 'invited', ?, ?, ?, ?)`,
-    [id, input.email, input.name, clientId, getSetting(db, "defaultNotifyEmail") === false ? 0 : 1, req.user.id, at, at],
+    [id, input.email, input.name, clientId, await getSetting(db, "defaultNotifyEmail") === false ? 0 : 1, req.user.id, at, at],
   );
-  logActivity(req, {
+  await logActivity(req, {
     action: "user.invited",
     entityType: "user",
     entityId: id,
@@ -237,13 +237,13 @@ function insertClientUser(req, clientId, input) {
 }
 
 // Brand rows with counts; `where` must reference alias b.
-function brandsWithCounts(req, where, params) {
+async function brandsWithCounts(req, where, params) {
   const db = req.ctx.db;
   const scope = scopeSql.brands(req, "b");
-  const rows = db.all(
+  const rows = await db.all(
     `SELECT b.*, c.name AS client_name FROM brands b JOIN clients c ON c.id = b.client_id
       WHERE ${scope.sql} AND ${where}
-      ORDER BY b.status = 'archived', b.name COLLATE NOCASE`,
+      ORDER BY b.status = 'archived', b.name COLLATE utf8mb4_0900_ai_ci`,
     [...scope.params, ...params],
   );
   if (!rows.length) return [];
@@ -253,7 +253,7 @@ function brandsWithCounts(req, where, params) {
   const counts = new Map(ids.map((id) => [id, { projects: 0, activeProjects: 0, materials: 0, released: 0, kits: 0 }]));
   if (withCounts) {
     const projectScope = scopeSql.projects(req, "p");
-    for (const row of db.all(
+    for (const row of await db.all(
       `SELECT p.brand_id, COUNT(*) AS n, SUM(p.status NOT IN ('delivered', 'archived')) AS open FROM projects p
         WHERE p.status != 'archived' AND ${projectScope.sql} AND p.brand_id IN (${placeholders(ids)}) GROUP BY p.brand_id`,
       [...projectScope.params, ...ids],
@@ -261,7 +261,7 @@ function brandsWithCounts(req, where, params) {
       counts.get(row.brand_id).projects = row.n;
       counts.get(row.brand_id).activeProjects = row.open ?? 0;
     }
-    for (const row of db.all(
+    for (const row of await db.all(
       `SELECT brand_id, COUNT(*) AS n, SUM(visibility = 'released') AS released FROM materials
         WHERE archived_at IS NULL AND brand_id IN (${placeholders(ids)}) GROUP BY brand_id`,
       ids,
@@ -269,7 +269,7 @@ function brandsWithCounts(req, where, params) {
       counts.get(row.brand_id).materials = row.n;
       counts.get(row.brand_id).released = row.released ?? 0;
     }
-    for (const row of db.all(
+    for (const row of await db.all(
       `SELECT brand_id, COUNT(*) AS n FROM kits WHERE status != 'archived' AND brand_id IN (${placeholders(ids)}) GROUP BY brand_id`,
       ids,
     ))
@@ -278,28 +278,28 @@ function brandsWithCounts(req, where, params) {
   return rows.map((row) => ({ ...serializeBrand(req, row), ...(withCounts ? { counts: counts.get(row.id) } : {}) }));
 }
 
-function clientUsers(req, clientId) {
+async function clientUsers(req, clientId) {
   const db = req.ctx.db;
-  const rows = db.all(
+  const rows = await db.all(
     `SELECT * FROM users WHERE role = 'client' AND client_id = ?
-      ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'invited' THEN 1 ELSE 2 END, name COLLATE NOCASE`,
+      ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'invited' THEN 1 ELSE 2 END, name COLLATE utf8mb4_0900_ai_ci`,
     [clientId],
   );
-  const invites = inviteInfo(
+  const invites = await inviteInfo(
     db,
     rows.filter((row) => row.status === "invited").map((row) => row.id),
   );
   return rows.map((row) => ({ ...serializeUser(req, row), invite: invites.get(row.id) ?? null }));
 }
 
-function clientManagers(req, clientId) {
-  return req.ctx.db
+async function clientManagers(req, clientId) {
+  return (await req.ctx.db
     .all(
       `SELECT u.*, a.granted_at FROM staff_client_access a JOIN users u ON u.id = a.user_id
         WHERE a.client_id = ? AND u.role = 'manager'
-        ORDER BY u.status = 'disabled', u.name COLLATE NOCASE`,
+        ORDER BY u.status = 'disabled', u.name COLLATE utf8mb4_0900_ai_ci`,
       [clientId],
-    )
+    ))
     .map((row) => ({ ...serializeUser(req, row), grantedAt: row.granted_at }));
 }
 
@@ -322,14 +322,14 @@ function clientPermissions(req) {
   };
 }
 
-function clientSummary(req, id) {
+async function clientSummary(req, id) {
   const db = req.ctx.db;
-  const row = db.get("SELECT * FROM clients WHERE id = ?", [id]);
+  const row = await db.get("SELECT * FROM clients WHERE id = ?", [id]);
   return serializeClient(req, row);
 }
 
-function assertManagerTarget(db, userId) {
-  const user = db.get("SELECT * FROM users WHERE id = ?", [userId]);
+async function assertManagerTarget(db, userId) {
+  const user = await db.get("SELECT * FROM users WHERE id = ?", [userId]);
   if (!user || user.role !== "manager")
     throw validation({ userId: "Escolha um gestor. Administradores já acessam todos os clientes e designers acessam pelos projetos." });
   return user;
@@ -341,7 +341,7 @@ export default function clientsRoutes(ctx) {
   const router = Router();
   const { db } = ctx;
 
-  router.get("/api/clients", requireCap("clients.view"), (req, res) => {
+  router.get("/api/clients", requireCap("clients.view"), async (req, res) => {
     const scope = scopeSql.clients(req, "c");
     const projectScope = scopeSql.projects(req, "p");
     const where = [scope.sql];
@@ -362,28 +362,28 @@ export default function clientsRoutes(ctx) {
         columns.push("IFNULL(c.document, '')", "IFNULL(c.contact_email, '')", "IFNULL(c.contact_name, '')");
       const searchBrands = scopeSql.brands(req, "bq");
       where.push(
-        `(${columns.map((column) => `${column} LIKE ? ESCAPE '\\'`).join(" OR ")}
-          OR EXISTS (SELECT 1 FROM brands bq WHERE bq.client_id = c.id AND ${searchBrands.sql} AND bq.name LIKE ? ESCAPE '\\'))`,
+        `(${columns.map((column) => `${column} LIKE ? COLLATE utf8mb4_0900_ai_ci`).join(" OR ")}
+          OR EXISTS (SELECT 1 FROM brands bq WHERE bq.client_id = c.id AND ${searchBrands.sql} AND bq.name LIKE ? COLLATE utf8mb4_0900_ai_ci))`,
       );
       params.push(...columns.map(() => like), ...searchBrands.params, like);
     }
-    const rows = db.all(
+    const rows = await db.all(
       `SELECT c.*,
          (SELECT COUNT(*) FROM projects p JOIN brands pb ON pb.id = p.brand_id
            WHERE pb.client_id = c.id AND p.status NOT IN ('archived', 'delivered') AND ${projectScope.sql}) AS project_count,
          (SELECT COUNT(*) FROM users u WHERE u.role = 'client' AND u.client_id = c.id AND u.status != 'disabled') AS user_count
         FROM clients c WHERE ${where.join(" AND ")}
-        ORDER BY CASE c.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END, c.name COLLATE NOCASE`,
+        ORDER BY CASE c.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END, c.name COLLATE utf8mb4_0900_ai_ci`,
       [...projectScope.params, ...params],
     );
     const ids = rows.map((row) => row.id);
     const brandScope = scopeSql.brands(req, "b");
     const brands = new Map(ids.map((id) => [id, []]));
     if (ids.length)
-      for (const row of db.all(
+      for (const row of await db.all(
         `SELECT b.id, b.name, b.slug, b.status, b.client_id FROM brands b
           WHERE b.client_id IN (${placeholders(ids)}) AND ${brandScope.sql}
-          ORDER BY b.status = 'archived', b.name COLLATE NOCASE`,
+          ORDER BY b.status = 'archived', b.name COLLATE utf8mb4_0900_ai_ci`,
         [...ids, ...brandScope.params],
       ))
         brands.get(row.client_id).push({ id: row.id, name: row.name, slug: row.slug, status: row.status });
@@ -406,16 +406,16 @@ export default function clientsRoutes(ctx) {
 
   router.post("/api/clients", requireCap("clients.create"), async (req, res) => {
     const input = parse(clientCreateSchema, req.body);
-    if (input.user && db.get("SELECT id FROM users WHERE email = ?", [input.user.email]))
+    if (input.user && await db.get("SELECT id FROM users WHERE email = ?", [input.user.email]))
       throw validation({ "user.email": "Já existe um acesso com este e-mail." });
     const managerIds = [...new Set(input.managerIds ?? [])];
-    for (const managerId of managerIds) assertManagerTarget(db, managerId);
+    for (const managerId of managerIds) await assertManagerTarget(db, managerId);
     const id = newId("cli");
     const at = now();
     let brandId = null;
     let userId = null;
-    db.tx(() => {
-      db.run(
+    await db.tx(async () => {
+      await db.run(
         `INSERT INTO clients (id, name, legal_name, document, contact_name, contact_email, contact_phone, status,
            internal_notes, created_by, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
@@ -433,18 +433,18 @@ export default function clientsRoutes(ctx) {
           at,
         ],
       );
-      logActivity(req, {
+      await logActivity(req, {
         action: "client.created",
         entityType: "client",
         entityId: id,
         clientId: id,
         summary: `Cliente ${input.name} criado.`,
       });
-      if (input.brand) brandId = insertBrand(req, id, input.brand);
+      if (input.brand) brandId = await insertBrand(req, id, input.brand);
       for (const managerId of managerIds)
-        db.run("INSERT INTO staff_client_access (user_id, client_id, granted_by, granted_at) VALUES (?, ?, ?, ?)", [managerId, id, req.user.id, at]);
+        await db.run("INSERT INTO staff_client_access (user_id, client_id, granted_by, granted_at) VALUES (?, ?, ?, ?)", [managerId, id, req.user.id, at]);
       if (managerIds.length)
-        logActivity(req, {
+        await logActivity(req, {
           action: "client.managers_changed",
           entityType: "client",
           entityId: id,
@@ -452,32 +452,32 @@ export default function clientsRoutes(ctx) {
           summary: `${managerIds.length === 1 ? "1 gestor recebeu" : `${managerIds.length} gestores receberam`} acesso ao cliente ${input.name}.`,
           data: { added: managerIds },
         });
-      for (const managerId of managerIds) notifyAccessGranted(req, { id: managerId }, [id]);
-      if (input.user) userId = insertClientUser(req, id, input.user);
+      for (const managerId of managerIds) await notifyAccessGranted(req, { id: managerId }, [id]);
+      if (input.user) userId = await insertClientUser(req, id, input.user);
     });
     let invite = {};
     let user = null;
     if (userId) {
-      const row = db.get("SELECT * FROM users WHERE id = ?", [userId]);
+      const row = await db.get("SELECT * FROM users WHERE id = ?", [userId]);
       invite = await deliverInvite(req, row, { clientName: input.name });
-      user = { ...serializeUser(req, row), invite: inviteInfo(db, [userId]).get(userId) ?? null };
+      user = { ...serializeUser(req, row), invite: (await inviteInfo(db, [userId])).get(userId) ?? null };
     }
     res.status(201).json({
-      client: clientSummary(req, id),
-      brand: brandId ? serializeBrand(req, db.get("SELECT b.*, c.name AS client_name FROM brands b JOIN clients c ON c.id = b.client_id WHERE b.id = ?", [brandId])) : null,
+      client: await clientSummary(req, id),
+      brand: brandId ? serializeBrand(req, await db.get("SELECT b.*, c.name AS client_name FROM brands b JOIN clients c ON c.id = b.client_id WHERE b.id = ?", [brandId])) : null,
       user,
       ...invite,
     });
   });
 
-  router.get("/api/clients/:id", requireCap("clients.view"), (req, res) => {
-    const row = assertClient(req, req.params.id);
+  router.get("/api/clients/:id", requireCap("clients.view"), async (req, res) => {
+    const row = await assertClient(req, req.params.id);
     const permissions = clientPermissions(req);
-    const brands = brandsWithCounts(req, "b.client_id = ?", [row.id]);
-    const projects = permissions.canViewProjects ? listProjects(req, { clientId: row.id, archived: true }) : [];
+    const brands = await brandsWithCounts(req, "b.client_id = ?", [row.id]);
+    const projects = permissions.canViewProjects ? await listProjects(req, { clientId: row.id, archived: true }) : [];
     const client = serializeClient(req, row);
     if (req.user.role !== "designer") {
-      const materials = db.get(
+      const materials = await db.get(
         `SELECT COUNT(*) AS n, SUM(m.visibility = 'released') AS released, MAX(m.released_at) AS last_release
            FROM materials m JOIN brands b ON b.id = m.brand_id WHERE b.client_id = ? AND m.archived_at IS NULL`,
         [row.id],
@@ -491,16 +491,16 @@ export default function clientsRoutes(ctx) {
     res.json({
       client,
       brands,
-      users: permissions.canViewUsers ? clientUsers(req, row.id) : [],
+      users: permissions.canViewUsers ? await clientUsers(req, row.id) : [],
       projects,
-      managers: permissions.canViewTeam ? clientManagers(req, row.id) : [],
+      managers: permissions.canViewTeam ? await clientManagers(req, row.id) : [],
       email: { configured: ctx.mailer.isConfigured() },
       permissions,
     });
   });
 
-  router.patch("/api/clients/:id", requireCap("clients.edit", "brands.edit"), (req, res) => {
-    const row = assertClient(req, req.params.id);
+  router.patch("/api/clients/:id", requireCap("clients.edit", "brands.edit"), async (req, res) => {
+    const row = await assertClient(req, req.params.id);
     const input = parse(clientPatchSchema, req.body);
     const keys = Object.keys(input).filter((key) => input[key] !== undefined);
     if (!can(req.user, "clients.edit")) {
@@ -512,13 +512,13 @@ export default function clientsRoutes(ctx) {
     }
     const changed = keys.filter((key) => (input[key] ?? null) !== (row[CLIENT_COLUMNS[key]] ?? null));
     if (changed.length) {
-      db.tx(() => {
-        db.run(
+      await db.tx(async () => {
+        await db.run(
           `UPDATE clients SET ${changed.map((key) => `${CLIENT_COLUMNS[key]} = ?`).join(", ")}, updated_at = ? WHERE id = ?`,
           [...changed.map((key) => input[key] ?? null), now(), row.id],
         );
         const statusChanged = changed.includes("status");
-        logActivity(req, {
+        await logActivity(req, {
           action: statusChanged ? "client.status_changed" : "client.updated",
           entityType: "client",
           entityId: row.id,
@@ -530,34 +530,34 @@ export default function clientsRoutes(ctx) {
         });
       });
     }
-    res.json({ client: clientSummary(req, row.id) });
+    res.json({ client: await clientSummary(req, row.id) });
   });
 
   // ---------------------------------------------------------------- client users
 
-  router.get("/api/clients/:id/users", requireCap("clients.view"), (req, res) => {
-    const row = assertClient(req, req.params.id);
+  router.get("/api/clients/:id/users", requireCap("clients.view"), async (req, res) => {
+    const row = await assertClient(req, req.params.id);
     if (req.user.role === "designer") throw forbidden();
-    const items = clientUsers(req, row.id);
+    const items = await clientUsers(req, row.id);
     res.json({ items, total: items.length, email: { configured: ctx.mailer.isConfigured() } });
   });
 
   router.post("/api/clients/:id/users", requireCap("clients.edit", "brands.edit"), async (req, res) => {
-    const client = assertClient(req, req.params.id);
+    const client = await assertClient(req, req.params.id);
     if (client.status === "archived") throw conflict("Este cliente está arquivado. Reative-o antes de convidar pessoas.", "client_archived");
     const input = parse(userInviteSchema, req.body);
     let userId;
-    db.tx(() => {
-      userId = insertClientUser(req, client.id, input);
+    await db.tx(async () => {
+      userId = await insertClientUser(req, client.id, input);
     });
-    const row = db.get("SELECT * FROM users WHERE id = ?", [userId]);
+    const row = await db.get("SELECT * FROM users WHERE id = ?", [userId]);
     const invite = await deliverInvite(req, row, { clientName: client.name });
-    res.status(201).json({ user: { ...serializeUser(req, row), invite: inviteInfo(db, [userId]).get(userId) ?? null }, ...invite });
+    res.status(201).json({ user: { ...serializeUser(req, row), invite: (await inviteInfo(db, [userId])).get(userId) ?? null }, ...invite });
   });
 
-  router.patch("/api/clients/:id/users/:userId", requireCap("clients.edit", "brands.edit"), (req, res) => {
-    const client = assertClient(req, req.params.id);
-    const target = db.get("SELECT * FROM users WHERE id = ? AND role = 'client' AND client_id = ?", [req.params.userId, client.id]);
+  router.patch("/api/clients/:id/users/:userId", requireCap("clients.edit", "brands.edit"), async (req, res) => {
+    const client = await assertClient(req, req.params.id);
+    const target = await db.get("SELECT * FROM users WHERE id = ? AND role = 'client' AND client_id = ?", [req.params.userId, client.id]);
     if (!target) throw notFound();
     const input = parse(clientUserPatchSchema, req.body);
     let nextStatus = input.status;
@@ -565,15 +565,15 @@ export default function clientsRoutes(ctx) {
     const statusChange = nextStatus !== undefined && nextStatus !== target.status;
     const nameChange = input.name !== undefined && input.name !== target.name;
     if (statusChange || nameChange) {
-      db.tx(() => {
-        db.run("UPDATE users SET name = ?, status = ?, updated_at = ? WHERE id = ?", [
+      await db.tx(async () => {
+        await db.run("UPDATE users SET name = ?, status = ?, updated_at = ? WHERE id = ?", [
           nameChange ? input.name : target.name,
           statusChange ? nextStatus : target.status,
           now(),
           target.id,
         ]);
-        if (statusChange && nextStatus === "disabled") cutAccess(db, target.id);
-        logActivity(req, {
+        if (statusChange && nextStatus === "disabled") await cutAccess(db, target.id);
+        await logActivity(req, {
           action: statusChange ? (nextStatus === "disabled" ? "user.disabled" : "user.enabled") : "user.updated",
           entityType: "user",
           entityId: target.id,
@@ -586,21 +586,21 @@ export default function clientsRoutes(ctx) {
         });
       });
     }
-    const fresh = db.get("SELECT * FROM users WHERE id = ?", [target.id]);
-    res.json({ user: { ...serializeUser(req, fresh), invite: inviteInfo(db, [fresh.id]).get(fresh.id) ?? null } });
+    const fresh = await db.get("SELECT * FROM users WHERE id = ?", [target.id]);
+    res.json({ user: { ...serializeUser(req, fresh), invite: (await inviteInfo(db, [fresh.id])).get(fresh.id) ?? null } });
   });
 
   // ---------------------------------------------------------------- managers with access
 
-  router.post("/api/clients/:id/managers", requireCap("team.manage"), (req, res) => {
-    const client = assertClient(req, req.params.id);
+  router.post("/api/clients/:id/managers", requireCap("team.manage"), async (req, res) => {
+    const client = await assertClient(req, req.params.id);
     const { userId } = parse(managerSchema, req.body);
-    const manager = assertManagerTarget(db, userId);
-    const exists = db.get("SELECT 1 AS yes FROM staff_client_access WHERE user_id = ? AND client_id = ?", [manager.id, client.id]);
+    const manager = await assertManagerTarget(db, userId);
+    const exists = await db.get("SELECT 1 AS yes FROM staff_client_access WHERE user_id = ? AND client_id = ?", [manager.id, client.id]);
     if (!exists) {
-      db.tx(() => {
-        db.run("INSERT INTO staff_client_access (user_id, client_id, granted_by, granted_at) VALUES (?, ?, ?, ?)", [manager.id, client.id, req.user.id, now()]);
-        logActivity(req, {
+      await db.tx(async () => {
+        await db.run("INSERT INTO staff_client_access (user_id, client_id, granted_by, granted_at) VALUES (?, ?, ?, ?)", [manager.id, client.id, req.user.id, now()]);
+        await logActivity(req, {
           action: "client.manager_added",
           entityType: "client",
           entityId: client.id,
@@ -608,20 +608,20 @@ export default function clientsRoutes(ctx) {
           summary: `${manager.name} recebeu acesso ao cliente ${client.name}.`,
           data: { userId: manager.id },
         });
-        if (manager.status !== "disabled") notifyAccessGranted(req, manager, [client.id]);
+        if (manager.status !== "disabled") await notifyAccessGranted(req, manager, [client.id]);
       });
     }
-    res.status(exists ? 200 : 201).json({ managers: clientManagers(req, client.id) });
+    res.status(exists ? 200 : 201).json({ managers: await clientManagers(req, client.id) });
   });
 
-  router.delete("/api/clients/:id/managers/:userId", requireCap("team.manage"), (req, res) => {
-    const client = assertClient(req, req.params.id);
-    const manager = db.get("SELECT * FROM users WHERE id = ?", [req.params.userId]);
+  router.delete("/api/clients/:id/managers/:userId", requireCap("team.manage"), async (req, res) => {
+    const client = await assertClient(req, req.params.id);
+    const manager = await db.get("SELECT * FROM users WHERE id = ?", [req.params.userId]);
     const { changes } = manager
-      ? db.run("DELETE FROM staff_client_access WHERE user_id = ? AND client_id = ?", [manager.id, client.id])
+      ? await db.run("DELETE FROM staff_client_access WHERE user_id = ? AND client_id = ?", [manager.id, client.id])
       : { changes: 0 };
     if (!changes) throw notFound();
-    logActivity(req, {
+    await logActivity(req, {
       action: "client.manager_removed",
       entityType: "client",
       entityId: client.id,
@@ -629,12 +629,12 @@ export default function clientsRoutes(ctx) {
       summary: `${manager.name} deixou de acessar o cliente ${client.name}.`,
       data: { userId: manager.id },
     });
-    res.json({ managers: clientManagers(req, client.id) });
+    res.json({ managers: await clientManagers(req, client.id) });
   });
 
   // ---------------------------------------------------------------- brands
 
-  router.get("/api/brands", requireAuth, (req, res) => {
+  router.get("/api/brands", requireAuth, async (req, res) => {
     const where = ["1 = 1"];
     const params = [];
     if (req.query.clientId) {
@@ -649,37 +649,37 @@ export default function clientsRoutes(ctx) {
     const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
     if (q) {
       const like = `%${escapeLike(q)}%`;
-      where.push("(b.name LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')");
+      where.push("(b.name LIKE ? COLLATE utf8mb4_0900_ai_ci OR c.name LIKE ? COLLATE utf8mb4_0900_ai_ci)");
       params.push(like, like);
     }
-    const items = brandsWithCounts(req, where.join(" AND "), params);
+    const items = await brandsWithCounts(req, where.join(" AND "), params);
     res.json({ items, total: items.length });
   });
 
-  router.post("/api/clients/:id/brands", requireCap("brands.edit"), (req, res) => {
-    const client = assertClient(req, req.params.id);
+  router.post("/api/clients/:id/brands", requireCap("brands.edit"), async (req, res) => {
+    const client = await assertClient(req, req.params.id);
     const input = parse(brandCreateSchema, req.body);
-    assertBrandName(db, client.id, input.name);
+    await assertBrandName(db, client.id, input.name);
     let id;
-    db.tx(() => {
-      id = insertBrand(req, client.id, input);
+    await db.tx(async () => {
+      id = await insertBrand(req, client.id, input);
     });
-    const [brand] = brandsWithCounts(req, "b.id = ?", [id]);
+    const [brand] = await brandsWithCounts(req, "b.id = ?", [id]);
     res.status(201).json({ brand });
   });
 
-  router.get("/api/brands/:id", requireAuth, (req, res) => {
-    const row = assertBrand(req, req.params.id);
+  router.get("/api/brands/:id", requireAuth, async (req, res) => {
+    const row = await assertBrand(req, req.params.id);
     if (req.user.role === "client" && row.status !== "active") throw notFound();
-    const [brand] = brandsWithCounts(req, "b.id = ?", [row.id]);
+    const [brand] = await brandsWithCounts(req, "b.id = ?", [row.id]);
     if (!brand) throw notFound();
     res.json({ brand });
   });
 
-  router.patch("/api/brands/:id", requireCap("brands.edit"), (req, res) => {
-    const row = assertBrand(req, req.params.id);
+  router.patch("/api/brands/:id", requireCap("brands.edit"), async (req, res) => {
+    const row = await assertBrand(req, req.params.id);
     const input = parse(brandPatchSchema, req.body);
-    if (input.name !== undefined && input.name !== row.name) assertBrandName(db, row.client_id, input.name, row.id);
+    if (input.name !== undefined && input.name !== row.name) await assertBrandName(db, row.client_id, input.name, row.id);
     // Guideline fields only change the team's draft; the identity release
     // publishes them (routes/brandlib.js, D3).
     const columns = {
@@ -690,8 +690,8 @@ export default function clientsRoutes(ctx) {
     };
     const changed = Object.keys(columns).filter((key) => input[key] !== undefined && (input[key] ?? null) !== (row[columns[key]] ?? null));
     const at = now();
-    db.tx(() => {
-      const guidelines = saveGuidelineDraft(
+    await db.tx(async () => {
+      const guidelines = await saveGuidelineDraft(
         db,
         row,
         { usage: input.usageGuidelines, typography: input.typographyGuidelines },
@@ -699,7 +699,7 @@ export default function clientsRoutes(ctx) {
       );
       if (!changed.length && !guidelines.changed) return;
       if (changed.length)
-        db.run(`UPDATE brands SET ${changed.map((key) => `${columns[key]} = ?`).join(", ")}, updated_at = ? WHERE id = ?`, [
+        await db.run(`UPDATE brands SET ${changed.map((key) => `${columns[key]} = ?`).join(", ")}, updated_at = ? WHERE id = ?`, [
           ...changed.map((key) => input[key] ?? null),
           at,
           row.id,
@@ -710,7 +710,7 @@ export default function clientsRoutes(ctx) {
         ...(guidelines.fields.includes("typography") ? ["typographyGuidelines"] : []),
       ];
       const archived = changed.includes("status");
-      logActivity(req, {
+      await logActivity(req, {
         action: archived ? (input.status === "archived" ? "brand.archived" : "brand.restored") : "brand.updated",
         entityType: "brand",
         entityId: row.id,
@@ -724,7 +724,7 @@ export default function clientsRoutes(ctx) {
         data: { fields, ...(guidelines.changed ? { guidelinesDraft: guidelines.pending } : {}) },
       });
     });
-    const [brand] = brandsWithCounts(req, "b.id = ?", [row.id]);
+    const [brand] = await brandsWithCounts(req, "b.id = ?", [row.id]);
     res.json({ brand });
   });
 

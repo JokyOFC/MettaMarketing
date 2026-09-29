@@ -146,8 +146,8 @@ const creator = (row) => (row.creator_id ? userRef({ id: row.creator_id, name: r
 
 // Contract summary + payment gate (services/contracts.js). Clients only see
 // contracts that were sent to them.
-function contractInfo(req, { orderId = null, subscriptionId = null, row }) {
-  const gate = contractGate(req.ctx, { orderId, subscriptionId, waived: Boolean(row.contract_waived_at) });
+async function contractInfo(req, { orderId = null, subscriptionId = null, row }) {
+  const gate = await contractGate(req.ctx, { orderId, subscriptionId, waived: Boolean(row.contract_waived_at) });
   const visible =
     gate.contract && (isStaff(req) || !["draft", "sending", "failed"].includes(gate.contract.status));
   const info = {
@@ -175,7 +175,7 @@ function contractBlockReason(contract) {
   return "A Metta está preparando o contrato. O pagamento é liberado depois da assinatura.";
 }
 
-export function serializeOrder(req, row) {
+export async function serializeOrder(req, row) {
   const order = {
     id: row.id,
     description: row.description,
@@ -191,7 +191,7 @@ export function serializeOrder(req, row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
-  Object.assign(order, contractInfo(req, { orderId: row.id, row }));
+  Object.assign(order, await contractInfo(req, { orderId: row.id, row }));
   if (isStaff(req)) {
     order.externalReference = row.external_reference;
     order.checkoutUrl = row.checkout_url ?? null;
@@ -204,7 +204,7 @@ export function serializeOrder(req, row) {
   return order;
 }
 
-export function serializeSubscription(req, row) {
+export async function serializeSubscription(req, row) {
   const subscription = {
     id: row.id,
     status: row.status,
@@ -219,7 +219,7 @@ export function serializeSubscription(req, row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
-  Object.assign(subscription, contractInfo(req, { subscriptionId: row.id, row }));
+  Object.assign(subscription, await contractInfo(req, { subscriptionId: row.id, row }));
   if (isStaff(req)) {
     subscription.externalReference = row.external_reference;
     subscription.checkoutUrl = row.checkout_url ?? null;
@@ -256,10 +256,10 @@ export function serializePayment(req, row) {
   return payment;
 }
 
-function timeline(req, entityType, entityId) {
+async function timeline(req, entityType, entityId) {
   const staff = isStaff(req);
-  return req.ctx.db
-    .all(`${ACTIVITY_SELECT} WHERE a.entity_type = ? AND a.entity_id = ? ORDER BY a.id ASC`, [entityType, entityId])
+  return (await req.ctx.db
+    .all(`${ACTIVITY_SELECT} WHERE a.entity_type = ? AND a.entity_id = ? ORDER BY a.id ASC`, [entityType, entityId]))
     .filter((row) => staff || row.visibility === "client")
     .map((row) => ({
       id: row.id,
@@ -277,44 +277,44 @@ export default function commerceRoutes(ctx) {
   const router = Router();
   const { db } = ctx;
 
-  const getOrderRow = (id) => (id ? db.get(`${ORDER_SELECT} WHERE o.id = ?`, [id]) : null);
-  const getSubscriptionRow = (id) => (id ? db.get(`${SUBSCRIPTION_SELECT} WHERE sb.id = ?`, [id]) : null);
+  const getOrderRow = async (id) => (id ? await db.get(`${ORDER_SELECT} WHERE o.id = ?`, [id]) : null);
+  const getSubscriptionRow = async (id) => (id ? await db.get(`${SUBSCRIPTION_SELECT} WHERE sb.id = ?`, [id]) : null);
 
   // Staff scope: out-of-scope clients answer 404 (finance/admin see all).
-  function assertOrder(req, id) {
-    const row = getOrderRow(id);
+  async function assertOrder(req, id) {
+    const row = await getOrderRow(id);
     if (!row) throw notFound("Não encontramos este pedido.");
-    assertClient(req, row.client_id);
+    await assertClient(req, row.client_id);
     return row;
   }
-  function assertSubscription(req, id) {
-    const row = getSubscriptionRow(id);
+  async function assertSubscription(req, id) {
+    const row = await getSubscriptionRow(id);
     if (!row) throw notFound("Não encontramos esta assinatura.");
-    assertClient(req, row.client_id);
+    await assertClient(req, row.client_id);
     return row;
   }
 
-  function orderDetail(req, row) {
-    const payments = db
-      .all(`${PAYMENT_SELECT} WHERE p.order_id = ? ORDER BY p.created_at DESC`, [row.id])
+  async function orderDetail(req, row) {
+    const payments = (await db
+      .all(`${PAYMENT_SELECT} WHERE p.order_id = ? ORDER BY p.created_at DESC`, [row.id]))
       .map((p) => serializePayment(req, p));
     return {
-      ...serializeOrder(req, row),
+      ...await serializeOrder(req, row),
       payments,
-      timeline: timeline(req, "order", row.id),
-      recipients: clientUserIds(db, row.client_id).length,
+      timeline: await timeline(req, "order", row.id),
+      recipients: (await clientUserIds(db, row.client_id)).length,
     };
   }
 
-  function subscriptionDetail(req, row) {
-    const payments = db
-      .all(`${PAYMENT_SELECT} WHERE p.subscription_id = ? ORDER BY p.created_at DESC`, [row.id])
+  async function subscriptionDetail(req, row) {
+    const payments = (await db
+      .all(`${PAYMENT_SELECT} WHERE p.subscription_id = ? ORDER BY p.created_at DESC`, [row.id]))
       .map((p) => serializePayment(req, p));
     return {
-      ...serializeSubscription(req, row),
+      ...await serializeSubscription(req, row),
       payments,
-      timeline: timeline(req, "subscription", row.id),
-      recipients: clientUserIds(db, row.client_id).length,
+      timeline: await timeline(req, "subscription", row.id),
+      recipients: (await clientUserIds(db, row.client_id)).length,
     };
   }
 
@@ -329,8 +329,8 @@ export default function commerceRoutes(ctx) {
     const work = (async () => {
       const preference = await mp.createPreference(req.ctx, row);
       const at = now();
-      db.tx(() => {
-        const { changes } = db.run(
+      await db.tx(async () => {
+        const { changes } = await db.run(
           `UPDATE orders SET mp_preference_id = ?, checkout_url = ?,
              status = CASE WHEN status = 'draft' OR ? THEN 'pending_payment' ELSE status END,
              failure_reason = CASE WHEN status = 'draft' OR ? THEN NULL ELSE failure_reason END,
@@ -339,7 +339,7 @@ export default function commerceRoutes(ctx) {
           [preference.id, preference.url, regenerate, regenerate, at, row.id],
         );
         if (!changes) throw conflict("Este pedido mudou enquanto o link era gerado. Atualize a página.");
-        logActivity(req, {
+        await logActivity(req, {
           action: "order.checkout_created",
           entityType: "order",
           entityId: row.id,
@@ -366,16 +366,16 @@ export default function commerceRoutes(ctx) {
     const key = `subscription:${row.id}`;
     if (locks.has(key)) return locks.get(key);
     const work = (async () => {
-      const service = db.get("SELECT * FROM services WHERE id = ?", [row.service_id]);
+      const service = await db.get("SELECT * FROM services WHERE id = ?", [row.service_id]);
       const preapproval = await mp.createPreapproval(req.ctx, row, service);
-      db.tx(() => {
-        const { changes } = db.run(
+      await db.tx(async () => {
+        const { changes } = await db.run(
           `UPDATE subscriptions SET mp_preapproval_id = ?, checkout_url = ?, status = 'pending', failure_reason = NULL, updated_at = ?
            WHERE id = ? AND status IN ('pending', 'failed')`,
           [preapproval.id, preapproval.url, now(), row.id],
         );
         if (!changes) throw conflict("Esta assinatura mudou enquanto o link era gerado. Atualize a página.");
-        logActivity(req, {
+        await logActivity(req, {
           action: "subscription.checkout_created",
           entityType: "subscription",
           entityId: row.id,
@@ -398,19 +398,19 @@ export default function commerceRoutes(ctx) {
 
   // --------------------------------------------------------------- options for forms/filters
 
-  router.get("/api/commerce/options", requireAuth, requireCap("orders.view"), (req, res) => {
+  router.get("/api/commerce/options", requireAuth, requireCap("orders.view"), async (req, res) => {
     const scope = scopeSql.clients(req, "c");
-    const clients = db.all(
-      `SELECT c.id, c.name, c.status, c.contact_email FROM clients c WHERE ${scope.sql} ORDER BY c.name COLLATE NOCASE`,
+    const clients = await db.all(
+      `SELECT c.id, c.name, c.status, c.contact_email FROM clients c WHERE ${scope.sql} ORDER BY c.name COLLATE utf8mb4_0900_ai_ci`,
       scope.params,
     );
-    const brands = db.all("SELECT id, client_id, name, status FROM brands ORDER BY name COLLATE NOCASE");
+    const brands = await db.all("SELECT id, client_id, name, status FROM brands ORDER BY name COLLATE utf8mb4_0900_ai_ci");
     const byClient = new Map();
     for (const brand of brands) {
       if (!byClient.has(brand.client_id)) byClient.set(brand.client_id, []);
       byClient.get(brand.client_id).push({ id: brand.id, name: brand.name, status: brand.status });
     }
-    const services = db.all("SELECT * FROM services WHERE active = 1 ORDER BY sort_order, name COLLATE NOCASE");
+    const services = await db.all("SELECT * FROM services WHERE active = 1 ORDER BY sort_order, name COLLATE utf8mb4_0900_ai_ci");
     res.json({
       clients: clients.map((c) => ({
         id: c.id,
@@ -425,15 +425,15 @@ export default function commerceRoutes(ctx) {
 
   // --------------------------------------------------------------- services catalog
 
-  function serviceUsage() {
+  async function serviceUsage() {
     const usage = new Map();
     const get = (id) => {
       if (!usage.has(id)) usage.set(id, { orders: 0, activeSubscriptions: 0, subscriptions: 0 });
       return usage.get(id);
     };
-    for (const row of db.all("SELECT service_id, COUNT(*) AS n FROM orders WHERE service_id IS NOT NULL GROUP BY service_id"))
+    for (const row of await db.all("SELECT service_id, COUNT(*) AS n FROM orders WHERE service_id IS NOT NULL GROUP BY service_id"))
       get(row.service_id).orders = row.n;
-    for (const row of db.all(
+    for (const row of await db.all(
       "SELECT service_id, COUNT(*) AS n, SUM(status = 'active') AS active FROM subscriptions GROUP BY service_id",
     )) {
       get(row.service_id).subscriptions = row.n;
@@ -442,7 +442,7 @@ export default function commerceRoutes(ctx) {
     return (id) => usage.get(id) ?? { orders: 0, activeSubscriptions: 0, subscriptions: 0 };
   }
 
-  router.get("/api/services", requireAuth, requireCap("services.view"), (req, res) => {
+  router.get("/api/services", requireAuth, requireCap("services.view"), async (req, res) => {
     const where = [];
     const params = [];
     if (req.query.active === "1" || req.query.active === "true") where.push("active = 1");
@@ -450,23 +450,23 @@ export default function commerceRoutes(ctx) {
       where.push("kind = ?");
       params.push(req.query.kind);
     }
-    const rows = db.all(
-      `SELECT * FROM services ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY sort_order, name COLLATE NOCASE`,
+    const rows = await db.all(
+      `SELECT * FROM services ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY sort_order, name COLLATE utf8mb4_0900_ai_ci`,
       params,
     );
-    const usage = serviceUsage();
+    const usage = await serviceUsage();
     res.json({ items: rows.map((row) => serializeService(row, usage(row.id))), total: rows.length });
   });
 
-  router.post("/api/services", requireAuth, requireCap("services.manage"), (req, res) => {
+  router.post("/api/services", requireAuth, requireCap("services.manage"), async (req, res) => {
     const input = parse(serviceCreateSchema, req.body);
     if (input.kind === "subscription" && input.priceCents <= 0)
       throw validation({ priceCents: "Assinaturas precisam de um valor mensal maior que zero." });
     const id = newId("svc");
     const at = now();
-    db.tx(() => {
-      const max = db.get("SELECT COALESCE(MAX(sort_order), 0) AS n FROM services").n;
-      db.run(
+    await db.tx(async () => {
+      const max = (await db.get("SELECT COALESCE(MAX(sort_order), 0) AS n FROM services")).n;
+      await db.run(
         `INSERT INTO services (id, name, kind, price_cents, billing_interval, description, items, includes_editables,
            active, sort_order, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -485,36 +485,37 @@ export default function commerceRoutes(ctx) {
           at,
         ],
       );
-      logActivity(req, {
+      await logActivity(req, {
         action: "service.created",
         entityType: "service",
         entityId: id,
         summary: `Serviço criado: ${input.name} (${mp.formatBRL(input.priceCents)}${input.kind === "subscription" ? "/mês" : ""})`,
       });
     });
-    const row = db.get("SELECT * FROM services WHERE id = ?", [id]);
-    res.status(201).json({ service: serializeService(row, serviceUsage()(id)) });
+    const row = await db.get("SELECT * FROM services WHERE id = ?", [id]);
+    res.status(201).json({ service: serializeService(row, (await serviceUsage())(id)) });
   });
 
-  router.post("/api/services/reorder", requireAuth, requireCap("services.manage"), (req, res) => {
+  router.post("/api/services/reorder", requireAuth, requireCap("services.manage"), async (req, res) => {
     const { ids } = parse(reorderSchema, req.body);
-    const known = new Set(db.all("SELECT id FROM services").map((row) => row.id));
+    const known = new Set((await db.all("SELECT id FROM services")).map((row) => row.id));
     if (ids.some((id) => !known.has(id))) throw notFound("Não encontramos um dos serviços.");
-    db.tx(() => {
-      ids.forEach((id, index) => db.run("UPDATE services SET sort_order = ?, updated_at = ? WHERE id = ?", [(index + 1) * 10, now(), id]));
-      logActivity(req, { action: "service.reordered", entityType: "service", summary: "Ordem do catálogo atualizada" });
+    await db.tx(async () => {
+      for (const [index, id] of ids.entries())
+        await db.run("UPDATE services SET sort_order = ?, updated_at = ? WHERE id = ?", [(index + 1) * 10, now(), id]);
+      await logActivity(req, { action: "service.reordered", entityType: "service", summary: "Ordem do catálogo atualizada" });
     });
-    const usage = serviceUsage();
+    const usage = await serviceUsage();
     res.json({
-      items: db.all("SELECT * FROM services ORDER BY sort_order, name COLLATE NOCASE").map((row) => serializeService(row, usage(row.id))),
+      items: (await db.all("SELECT * FROM services ORDER BY sort_order, name COLLATE utf8mb4_0900_ai_ci")).map((row) => serializeService(row, usage(row.id))),
     });
   });
 
-  router.patch("/api/services/:id", requireAuth, requireCap("services.manage"), (req, res) => {
-    const row = db.get("SELECT * FROM services WHERE id = ?", [req.params.id]);
+  router.patch("/api/services/:id", requireAuth, requireCap("services.manage"), async (req, res) => {
+    const row = await db.get("SELECT * FROM services WHERE id = ?", [req.params.id]);
     if (!row) throw notFound("Não encontramos este serviço.");
     const input = parse(servicePatchSchema, req.body);
-    const usage = serviceUsage()(row.id);
+    const usage = (await serviceUsage())(row.id);
     const kind = input.kind ?? row.kind;
     if (input.kind && input.kind !== row.kind && (usage.orders || usage.subscriptions))
       throw conflict("Este serviço já tem pedidos ou assinaturas. Crie um novo serviço em vez de mudar o tipo.");
@@ -541,13 +542,13 @@ export default function commerceRoutes(ctx) {
     if (input.sortOrder !== undefined) put("sort_order", input.sortOrder);
     if (sets.length) {
       put("updated_at", now());
-      db.tx(() => {
-        db.run(`UPDATE services SET ${sets.join(", ")} WHERE id = ?`, [...params, row.id]);
+      await db.tx(async () => {
+        await db.run(`UPDATE services SET ${sets.join(", ")} WHERE id = ?`, [...params, row.id]);
         const changes = [];
         if (input.active !== undefined && bool(row.active) !== input.active) changes.push(input.active ? "ativado" : "desativado");
         if (input.priceCents !== undefined && input.priceCents !== row.price_cents)
           changes.push(`preço ${mp.formatBRL(row.price_cents)} → ${mp.formatBRL(input.priceCents)}`);
-        logActivity(req, {
+        await logActivity(req, {
           action: "service.updated",
           entityType: "service",
           entityId: row.id,
@@ -555,12 +556,12 @@ export default function commerceRoutes(ctx) {
         });
       });
     }
-    res.json({ service: serializeService(db.get("SELECT * FROM services WHERE id = ?", [row.id]), serviceUsage()(row.id)) });
+    res.json({ service: serializeService(await db.get("SELECT * FROM services WHERE id = ?", [row.id]), (await serviceUsage())(row.id)) });
   });
 
   // --------------------------------------------------------------- orders
 
-  router.get("/api/orders", requireAuth, requireCap("orders.view"), (req, res) => {
+  router.get("/api/orders", requireAuth, requireCap("orders.view"), async (req, res) => {
     const scope = scopeSql.clients(req, "c");
     const where = [scope.sql];
     const params = [...scope.params];
@@ -580,36 +581,36 @@ export default function commerceRoutes(ctx) {
       params.push(todaySP());
     }
     if (req.query.q) {
-      where.push("(o.description LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\' OR b.name LIKE ? ESCAPE '\\')");
+      where.push("(o.description LIKE ? COLLATE utf8mb4_0900_ai_ci OR c.name LIKE ? COLLATE utf8mb4_0900_ai_ci OR b.name LIKE ? COLLATE utf8mb4_0900_ai_ci)");
       params.push(like(req.query.q), like(req.query.q), like(req.query.q));
     }
     const { limit, offset, page, pageSize } = paginate(req.query);
     const sql = `${ORDER_SELECT} WHERE ${where.join(" AND ")}`;
-    const total = db.get(`SELECT COUNT(*) AS n FROM (${sql})`, params).n;
-    const rows = db.all(`${sql} ORDER BY o.created_at DESC, o.id LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    const total = (await db.get(`SELECT COUNT(*) AS n FROM (${sql}) AS counted`, params)).n;
+    const rows = await db.all(`${sql} ORDER BY o.created_at DESC, o.id LIMIT ? OFFSET ?`, [...params, limit, offset]);
     const counts = { all: 0 };
-    for (const row of db.all(
+    for (const row of await db.all(
       `SELECT o.status, COUNT(*) AS n FROM orders o JOIN clients c ON c.id = o.client_id WHERE ${base.where.join(" AND ")} GROUP BY o.status`,
       base.params,
     )) {
       counts[row.status] = row.n;
       counts.all += row.n;
     }
-    res.json({ items: rows.map((row) => serializeOrder(req, row)), total, page, pageSize, counts });
+    res.json({ items: await Promise.all(rows.map((row) => serializeOrder(req, row))), total, page, pageSize, counts });
   });
 
-  router.post("/api/orders", requireAuth, requireCap("orders.manage"), (req, res) => {
+  router.post("/api/orders", requireAuth, requireCap("orders.manage"), async (req, res) => {
     const input = parse(orderCreateSchema, req.body);
-    const client = assertClient(req, input.clientId);
+    const client = await assertClient(req, input.clientId);
     if (client.status === "archived") throw validation({ clientId: "Este cliente está arquivado." });
     let brand = null;
     if (input.brandId) {
-      brand = db.get("SELECT * FROM brands WHERE id = ?", [input.brandId]);
+      brand = await db.get("SELECT * FROM brands WHERE id = ?", [input.brandId]);
       if (!brand || brand.client_id !== client.id) throw validation({ brandId: "Esta marca não pertence ao cliente escolhido." });
     }
     let service = null;
     if (input.serviceId) {
-      service = db.get("SELECT * FROM services WHERE id = ?", [input.serviceId]);
+      service = await db.get("SELECT * FROM services WHERE id = ?", [input.serviceId]);
       if (!service) throw validation({ serviceId: "Serviço não encontrado." });
       if (!service.active) throw validation({ serviceId: "Este serviço está inativo." });
     }
@@ -622,14 +623,14 @@ export default function commerceRoutes(ctx) {
 
     const id = newId("ord");
     const at = now();
-    db.tx(() => {
-      db.run(
+    await db.tx(async () => {
+      await db.run(
         `INSERT INTO orders (id, client_id, brand_id, service_id, description, amount_cents, status, due_date,
            external_reference, created_by, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
         [id, client.id, brand?.id ?? null, service?.id ?? null, description, amount, input.dueDate ?? null, `metta-${id}`, req.user.id, at, at],
       );
-      logActivity(req, {
+      await logActivity(req, {
         action: "order.created",
         entityType: "order",
         entityId: id,
@@ -638,15 +639,15 @@ export default function commerceRoutes(ctx) {
         summary: `Pedido criado: ${description} (${mp.formatBRL(amount)})`,
       });
     });
-    res.status(201).json({ order: orderDetail(req, getOrderRow(id)) });
+    res.status(201).json({ order: await orderDetail(req, await getOrderRow(id)) });
   });
 
-  router.get("/api/orders/:id", requireAuth, requireCap("orders.view"), (req, res) => {
-    res.json({ order: orderDetail(req, assertOrder(req, req.params.id)) });
+  router.get("/api/orders/:id", requireAuth, requireCap("orders.view"), async (req, res) => {
+    res.json({ order: await orderDetail(req, await assertOrder(req, req.params.id)) });
   });
 
-  router.patch("/api/orders/:id", requireAuth, requireCap("orders.manage"), (req, res) => {
-    const row = assertOrder(req, req.params.id);
+  router.patch("/api/orders/:id", requireAuth, requireCap("orders.manage"), async (req, res) => {
+    const row = await assertOrder(req, req.params.id);
     const input = parse(orderPatchSchema, req.body);
     const touchesCharge = ["brandId", "serviceId", "description", "amountCents"].some((key) => input[key] !== undefined);
     if (touchesCharge && row.status !== "draft")
@@ -654,11 +655,11 @@ export default function commerceRoutes(ctx) {
     if (input.dueDate !== undefined && !["draft", "pending_payment", "failed"].includes(row.status))
       throw conflict("Este pedido já foi concluído e não pode mais ser alterado.");
     if (input.brandId) {
-      const brand = db.get("SELECT client_id FROM brands WHERE id = ?", [input.brandId]);
+      const brand = await db.get("SELECT client_id FROM brands WHERE id = ?", [input.brandId]);
       if (!brand || brand.client_id !== row.client_id) throw validation({ brandId: "Esta marca não pertence a este cliente." });
     }
     if (input.serviceId) {
-      const service = db.get("SELECT active FROM services WHERE id = ?", [input.serviceId]);
+      const service = await db.get("SELECT active FROM services WHERE id = ?", [input.serviceId]);
       if (!service) throw validation({ serviceId: "Serviço não encontrado." });
     }
     const sets = [];
@@ -674,10 +675,10 @@ export default function commerceRoutes(ctx) {
     if (input.dueDate !== undefined) put("due_date", input.dueDate);
     if (sets.length) {
       put("updated_at", now());
-      db.tx(() => {
-        db.run(`UPDATE orders SET ${sets.join(", ")} WHERE id = ?`, [...params, row.id]);
-        const updated = getOrderRow(row.id);
-        logActivity(req, {
+      await db.tx(async () => {
+        await db.run(`UPDATE orders SET ${sets.join(", ")} WHERE id = ?`, [...params, row.id]);
+        const updated = await getOrderRow(row.id);
+        await logActivity(req, {
           action: "order.updated",
           entityType: "order",
           entityId: row.id,
@@ -687,28 +688,28 @@ export default function commerceRoutes(ctx) {
         });
       });
     }
-    res.json({ order: orderDetail(req, getOrderRow(row.id)) });
+    res.json({ order: await orderDetail(req, await getOrderRow(row.id)) });
   });
 
   router.post("/api/orders/:id/checkout", requireAuth, requireCap("orders.manage"), async (req, res) => {
-    const row = assertOrder(req, req.params.id);
+    const row = await assertOrder(req, req.params.id);
     const { regenerate = false } = parse(checkoutSchema, req.body ?? {});
     if (!["draft", "pending_payment", "failed"].includes(row.status))
       throw conflict(row.status === "paid" ? "Este pedido já está pago." : "Este pedido não aceita mais pagamentos.");
     const result = await ensureOrderCheckout(req, row, { regenerate });
-    res.json({ checkoutUrl: result.url, reused: result.reused, order: orderDetail(req, getOrderRow(row.id)) });
+    res.json({ checkoutUrl: result.url, reused: result.reused, order: await orderDetail(req, await getOrderRow(row.id)) });
   });
 
-  router.post("/api/orders/:id/send", requireAuth, requireCap("orders.manage"), (req, res) => {
-    const row = assertOrder(req, req.params.id);
+  router.post("/api/orders/:id/send", requireAuth, requireCap("orders.manage"), async (req, res) => {
+    const row = await assertOrder(req, req.params.id);
     if (!OPEN.has(row.status)) throw conflict("Gere o link de pagamento antes de enviar a cobrança ao cliente.");
-    const recipients = clientUserIds(db, row.client_id);
+    const recipients = await clientUserIds(db, row.client_id);
     if (!recipients.length)
       throw conflict("Este cliente ainda não tem usuários ativos na plataforma. Convide alguém em Clientes e marcas.");
     const due = row.due_date ? mp.formatDateBR(row.due_date) : null;
     let created = [];
-    db.tx(() => {
-      created = notify(req, recipients, {
+    await db.tx(async () => {
+      created = await notify(req, recipients, {
         type: "order.sent",
         title: "Nova cobrança da Metta",
         body: `${row.description}: ${mp.formatBRL(row.amount_cents)}${due ? `, com vencimento em ${due}` : ""}. Pague com segurança pelo Mercado Pago na área Financeiro.`,
@@ -723,7 +724,7 @@ export default function commerceRoutes(ctx) {
         ],
         actionLabel: "Ver e pagar",
       });
-      logActivity(req, {
+      await logActivity(req, {
         action: "order.sent",
         entityType: "order",
         entityId: row.id,
@@ -733,26 +734,26 @@ export default function commerceRoutes(ctx) {
         visibility: "client",
       });
     });
-    const emailable = db.get(
+    const emailable = (await db.get(
       `SELECT COUNT(*) AS n FROM users WHERE id IN (${recipients.map(() => "?").join(", ")}) AND notify_email = 1`,
       recipients,
-    ).n;
+    )).n;
     res.json({
       sent: created.length,
       emailRecipients: emailable,
       emailConfigured: ctx.mailer.isConfigured(),
-      order: orderDetail(req, getOrderRow(row.id)),
+      order: await orderDetail(req, await getOrderRow(row.id)),
     });
   });
 
   router.post("/api/orders/:id/cancel", requireAuth, requireCap("orders.manage"), async (req, res) => {
-    const row = assertOrder(req, req.params.id);
+    const row = await assertOrder(req, req.params.id);
     if (!["draft", "pending_payment", "failed"].includes(row.status))
       throw conflict(row.status === "paid" ? "Pedidos pagos não podem ser cancelados aqui. Faça o estorno pelo Mercado Pago." : "Este pedido já está encerrado.");
     const wasVisible = row.status !== "draft";
-    db.tx(() => {
-      db.run("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = ?", [now(), row.id, row.status]);
-      logActivity(req, {
+    await db.tx(async () => {
+      await db.run("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = ?", [now(), row.id, row.status]);
+      await logActivity(req, {
         action: "order.cancelled",
         entityType: "order",
         entityId: row.id,
@@ -762,7 +763,7 @@ export default function commerceRoutes(ctx) {
         visibility: wasVisible ? "client" : "internal",
       });
       if (wasVisible)
-        notify(req, clientUserIds(db, row.client_id), {
+        await notify(req, await clientUserIds(db, row.client_id), {
           type: "order.cancelled",
           title: "Cobrança cancelada",
           body: `A cobrança ${label(row)} foi cancelada pela Metta. Nenhum pagamento é necessário.`,
@@ -779,27 +780,27 @@ export default function commerceRoutes(ctx) {
         warning = "O pedido foi cancelado, mas não conseguimos desativar o link no Mercado Pago. Se alguém pagar por ele, o pagamento aparece aqui para estorno.";
       }
     }
-    res.json({ order: orderDetail(req, getOrderRow(row.id)), warning });
+    res.json({ order: await orderDetail(req, await getOrderRow(row.id)), warning });
   });
 
   // Pulls the payments of this order from Mercado Pago (when a webhook was missed).
   router.post("/api/orders/:id/sync", requireAuth, requireCap("orders.manage"), async (req, res) => {
-    const row = assertOrder(req, req.params.id);
+    const row = await assertOrder(req, req.params.id);
     const payments = await mp.searchPayments(req.ctx, row.external_reference);
     let changed = 0;
     for (const payment of payments) {
       try {
-        if (mp.applyPayment(req.ctx, payment).changed) changed += 1;
+        if ((await mp.applyPayment(req.ctx, payment)).changed) changed += 1;
       } catch (err) {
         if (!(err instanceof mp.ReconcileError)) throw err;
       }
     }
-    res.json({ found: payments.length, changed, order: orderDetail(req, getOrderRow(row.id)) });
+    res.json({ found: payments.length, changed, order: await orderDetail(req, await getOrderRow(row.id)) });
   });
 
   // --------------------------------------------------------------- subscriptions
 
-  router.get("/api/subscriptions", requireAuth, requireCap("orders.view"), (req, res) => {
+  router.get("/api/subscriptions", requireAuth, requireCap("orders.view"), async (req, res) => {
     const scope = scopeSql.clients(req, "c");
     const where = [scope.sql];
     const params = [...scope.params];
@@ -813,35 +814,35 @@ export default function commerceRoutes(ctx) {
       params.push(String(req.query.status));
     }
     if (req.query.q) {
-      where.push("(s.name LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\' OR sb.payer_email LIKE ? ESCAPE '\\')");
+      where.push("(s.name LIKE ? COLLATE utf8mb4_0900_ai_ci OR c.name LIKE ? COLLATE utf8mb4_0900_ai_ci OR sb.payer_email LIKE ? COLLATE utf8mb4_0900_ai_ci)");
       params.push(like(req.query.q), like(req.query.q), like(req.query.q));
     }
     const { limit, offset, page, pageSize } = paginate(req.query);
     const sql = `${SUBSCRIPTION_SELECT} WHERE ${where.join(" AND ")}`;
-    const total = db.get(`SELECT COUNT(*) AS n FROM (${sql})`, params).n;
-    const rows = db.all(`${sql} ORDER BY sb.created_at DESC, sb.id LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    const total = (await db.get(`SELECT COUNT(*) AS n FROM (${sql}) AS counted`, params)).n;
+    const rows = await db.all(`${sql} ORDER BY sb.created_at DESC, sb.id LIMIT ? OFFSET ?`, [...params, limit, offset]);
     const counts = { all: 0 };
-    for (const row of db.all(
+    for (const row of await db.all(
       `SELECT sb.status, COUNT(*) AS n FROM subscriptions sb JOIN clients c ON c.id = sb.client_id WHERE ${base.where.join(" AND ")} GROUP BY sb.status`,
       base.params,
     )) {
       counts[row.status] = row.n;
       counts.all += row.n;
     }
-    res.json({ items: rows.map((row) => serializeSubscription(req, row)), total, page, pageSize, counts });
+    res.json({ items: await Promise.all(rows.map((row) => serializeSubscription(req, row))), total, page, pageSize, counts });
   });
 
-  router.post("/api/subscriptions", requireAuth, requireCap("orders.manage"), (req, res) => {
+  router.post("/api/subscriptions", requireAuth, requireCap("orders.manage"), async (req, res) => {
     const input = parse(subscriptionCreateSchema, req.body);
-    const client = assertClient(req, input.clientId);
+    const client = await assertClient(req, input.clientId);
     if (client.status === "archived") throw validation({ clientId: "Este cliente está arquivado." });
-    const service = db.get("SELECT * FROM services WHERE id = ?", [input.serviceId]);
+    const service = await db.get("SELECT * FROM services WHERE id = ?", [input.serviceId]);
     if (!service) throw validation({ serviceId: "Plano não encontrado." });
     if (service.kind !== "subscription") throw validation({ serviceId: "Escolha um plano de assinatura mensal." });
     if (!service.active) throw validation({ serviceId: "Este plano está inativo." });
     const amount = input.amountCents ?? service.price_cents;
     if (!amount || amount <= 0) throw validation({ amountCents: "Informe um valor mensal maior que zero." });
-    const duplicate = db.get(
+    const duplicate = await db.get(
       "SELECT id FROM subscriptions WHERE client_id = ? AND service_id = ? AND status IN ('pending', 'active', 'paused')",
       [client.id, service.id],
     );
@@ -849,14 +850,14 @@ export default function commerceRoutes(ctx) {
 
     const id = newId("sub");
     const at = now();
-    db.tx(() => {
-      db.run(
+    await db.tx(async () => {
+      await db.run(
         `INSERT INTO subscriptions (id, client_id, service_id, amount_cents, status, payer_email, external_reference,
            created_by, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
         [id, client.id, service.id, amount, input.payerEmail, `metta-${id}`, req.user.id, at, at],
       );
-      logActivity(req, {
+      await logActivity(req, {
         action: "subscription.created",
         entityType: "subscription",
         entityId: id,
@@ -864,32 +865,32 @@ export default function commerceRoutes(ctx) {
         summary: `Assinatura criada: ${service.name} (${mp.formatBRL(amount)}/mês)`,
       });
     });
-    res.status(201).json({ subscription: subscriptionDetail(req, getSubscriptionRow(id)) });
+    res.status(201).json({ subscription: await subscriptionDetail(req, await getSubscriptionRow(id)) });
   });
 
-  router.get("/api/subscriptions/:id", requireAuth, requireCap("orders.view"), (req, res) => {
-    res.json({ subscription: subscriptionDetail(req, assertSubscription(req, req.params.id)) });
+  router.get("/api/subscriptions/:id", requireAuth, requireCap("orders.view"), async (req, res) => {
+    res.json({ subscription: await subscriptionDetail(req, await assertSubscription(req, req.params.id)) });
   });
 
   router.post("/api/subscriptions/:id/checkout", requireAuth, requireCap("orders.manage"), async (req, res) => {
-    const row = assertSubscription(req, req.params.id);
+    const row = await assertSubscription(req, req.params.id);
     const { regenerate = false } = parse(checkoutSchema, req.body ?? {});
     if (!["pending", "failed"].includes(row.status))
       throw conflict("Esta assinatura já foi autorizada ou encerrada; não precisa de um novo link.");
     const result = await ensureSubscriptionCheckout(req, row, { regenerate });
-    res.json({ checkoutUrl: result.url, reused: result.reused, subscription: subscriptionDetail(req, getSubscriptionRow(row.id)) });
+    res.json({ checkoutUrl: result.url, reused: result.reused, subscription: await subscriptionDetail(req, await getSubscriptionRow(row.id)) });
   });
 
-  router.post("/api/subscriptions/:id/send", requireAuth, requireCap("orders.manage"), (req, res) => {
-    const row = assertSubscription(req, req.params.id);
+  router.post("/api/subscriptions/:id/send", requireAuth, requireCap("orders.manage"), async (req, res) => {
+    const row = await assertSubscription(req, req.params.id);
     if (row.status !== "pending" || !row.checkout_url)
       throw conflict("Gere o link de autorização antes de enviar a assinatura ao cliente.");
-    const recipients = clientUserIds(db, row.client_id);
+    const recipients = await clientUserIds(db, row.client_id);
     if (!recipients.length)
       throw conflict("Este cliente ainda não tem usuários ativos na plataforma. Convide alguém em Clientes e marcas.");
     let created = [];
-    db.tx(() => {
-      created = notify(req, recipients, {
+    await db.tx(async () => {
+      created = await notify(req, recipients, {
         type: "subscription.sent",
         title: "Autorize sua assinatura Metta",
         body: `${row.service_name}: ${mp.formatBRL(row.amount_cents)} por mês. A autorização é feita no Mercado Pago com o e-mail ${row.payer_email}.`,
@@ -904,7 +905,7 @@ export default function commerceRoutes(ctx) {
         ],
         actionLabel: "Ver assinatura",
       });
-      logActivity(req, {
+      await logActivity(req, {
         action: "subscription.sent",
         entityType: "subscription",
         entityId: row.id,
@@ -916,12 +917,12 @@ export default function commerceRoutes(ctx) {
     res.json({
       sent: created.length,
       emailConfigured: ctx.mailer.isConfigured(),
-      subscription: subscriptionDetail(req, getSubscriptionRow(row.id)),
+      subscription: await subscriptionDetail(req, await getSubscriptionRow(row.id)),
     });
   });
 
   router.post("/api/subscriptions/:id/cancel", requireAuth, requireCap("orders.manage"), async (req, res) => {
-    const row = assertSubscription(req, req.params.id);
+    const row = await assertSubscription(req, req.params.id);
     if (row.status === "cancelled") throw conflict("Esta assinatura já está cancelada.");
     if (row.mp_preapproval_id) {
       if (!mp.mpStatus(ctx.config).configured)
@@ -932,9 +933,9 @@ export default function commerceRoutes(ctx) {
       await mp.cancelPreapproval(req.ctx, row.mp_preapproval_id);
     }
     const at = now();
-    db.tx(() => {
-      db.run("UPDATE subscriptions SET status = 'cancelled', cancelled_at = ?, updated_at = ? WHERE id = ?", [at, at, row.id]);
-      logActivity(req, {
+    await db.tx(async () => {
+      await db.run("UPDATE subscriptions SET status = 'cancelled', cancelled_at = ?, updated_at = ? WHERE id = ?", [at, at, row.id]);
+      await logActivity(req, {
         action: "subscription.cancelled",
         entityType: "subscription",
         entityId: row.id,
@@ -942,7 +943,7 @@ export default function commerceRoutes(ctx) {
         summary: `Assinatura cancelada: ${row.service_name}`,
         visibility: "client",
       });
-      notify(req, clientUserIds(db, row.client_id), {
+      await notify(req, await clientUserIds(db, row.client_id), {
         type: "subscription.cancelled",
         title: "Assinatura cancelada",
         body: `A assinatura ${row.service_name} foi cancelada. Não haverá novas cobranças mensais.`,
@@ -952,32 +953,32 @@ export default function commerceRoutes(ctx) {
         email: row.status !== "pending",
       });
     });
-    res.json({ subscription: subscriptionDetail(req, getSubscriptionRow(row.id)) });
+    res.json({ subscription: await subscriptionDetail(req, await getSubscriptionRow(row.id)) });
   });
 
   router.post("/api/subscriptions/:id/sync", requireAuth, requireCap("orders.manage"), async (req, res) => {
-    const row = assertSubscription(req, req.params.id);
+    const row = await assertSubscription(req, req.params.id);
     let changed = 0;
     if (row.mp_preapproval_id) {
       const preapproval = await mp.getPreapproval(req.ctx, row.mp_preapproval_id);
-      if (mp.applyPreapproval(req.ctx, preapproval).changed) changed += 1;
+      if ((await mp.applyPreapproval(req.ctx, preapproval)).changed) changed += 1;
     } else if (!mp.mpStatus(ctx.config).configured) {
       throw notConfigured(mp.MESSAGES.notConfigured);
     }
     const payments = await mp.searchPayments(req.ctx, row.external_reference);
     for (const payment of payments) {
       try {
-        if (mp.applyPayment(req.ctx, payment, { preapprovalId: row.mp_preapproval_id }).changed) changed += 1;
+        if ((await mp.applyPayment(req.ctx, payment, { preapprovalId: row.mp_preapproval_id })).changed) changed += 1;
       } catch (err) {
         if (!(err instanceof mp.ReconcileError)) throw err;
       }
     }
-    res.json({ found: payments.length, changed, subscription: subscriptionDetail(req, getSubscriptionRow(row.id)) });
+    res.json({ found: payments.length, changed, subscription: await subscriptionDetail(req, await getSubscriptionRow(row.id)) });
   });
 
   // --------------------------------------------------------------- payments & finance
 
-  router.get("/api/payments", requireAuth, requireCap("finance.view", "orders.view"), (req, res) => {
+  router.get("/api/payments", requireAuth, requireCap("finance.view", "orders.view"), async (req, res) => {
     const scope = scopeSql.clients(req, "c");
     const where = [`(p.client_id IS NULL OR ${scope.sql})`];
     const params = [...scope.params];
@@ -1000,36 +1001,36 @@ export default function commerceRoutes(ctx) {
     }
     const { limit, offset, page, pageSize } = paginate(req.query);
     const sql = `${PAYMENT_SELECT} WHERE ${where.join(" AND ")}`;
-    const total = db.get(`SELECT COUNT(*) AS n FROM (${sql})`, params).n;
-    const rows = db.all(`${sql} ORDER BY COALESCE(p.paid_at, p.updated_at) DESC, p.id LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    const total = (await db.get(`SELECT COUNT(*) AS n FROM (${sql}) AS counted`, params)).n;
+    const rows = await db.all(`${sql} ORDER BY COALESCE(p.paid_at, p.updated_at) DESC, p.id LIMIT ? OFFSET ?`, [...params, limit, offset]);
     res.json({ items: rows.map((row) => serializePayment(req, row)), total, page, pageSize });
   });
 
-  router.get("/api/finance/summary", requireAuth, requireCap("finance.view"), (req, res) => {
+  router.get("/api/finance/summary", requireAuth, requireCap("finance.view"), async (req, res) => {
     const today = todaySP();
     const month = monthRangeSP();
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const open = db.get(
+    const open = await db.get(
       "SELECT COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS cents FROM orders WHERE status IN ('pending_payment', 'failed')",
     );
-    const overdue = db.get(
+    const overdue = await db.get(
       `SELECT COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS cents FROM orders
         WHERE status IN ('pending_payment', 'failed') AND due_date IS NOT NULL AND due_date < ?`,
       [today],
     );
-    const failedOrders = db.get("SELECT COUNT(*) AS n FROM orders WHERE status = 'failed'").n;
-    const drafts = db.get("SELECT COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS cents FROM orders WHERE status = 'draft'");
-    const received = db.get(
+    const failedOrders = (await db.get("SELECT COUNT(*) AS n FROM orders WHERE status = 'failed'")).n;
+    const drafts = await db.get("SELECT COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS cents FROM orders WHERE status = 'draft'");
+    const received = await db.get(
       `SELECT COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS cents FROM payments
         WHERE status = 'approved' AND paid_at >= ? AND paid_at < ?`,
       [month.start, month.end],
     );
-    const active = db.get("SELECT COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS cents FROM subscriptions WHERE status = 'active'");
-    const pendingSubs = db.get("SELECT COUNT(*) AS n FROM subscriptions WHERE status = 'pending'").n;
-    const failures = db.get(
+    const active = await db.get("SELECT COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS cents FROM subscriptions WHERE status = 'active'");
+    const pendingSubs = (await db.get("SELECT COUNT(*) AS n FROM subscriptions WHERE status = 'pending'")).n;
+    const failures = (await db.get(
       "SELECT COUNT(*) AS n FROM payments WHERE status IN ('rejected', 'charged_back') AND updated_at >= ?",
       [since],
-    ).n;
+    )).n;
     res.json({
       month: month.key,
       receivable: { count: open.n, cents: open.cents, overdueCount: overdue.n, overdueCents: overdue.cents, failedCount: failedOrders },
@@ -1044,13 +1045,13 @@ export default function commerceRoutes(ctx) {
     res.json({ mercadopago: mp.mpStatus(ctx.config), email: { configured: ctx.mailer.isConfigured() } });
   });
 
-  router.get("/api/finance/webhooks", requireAuth, requireCap("finance.view"), (req, res) => {
+  router.get("/api/finance/webhooks", requireAuth, requireCap("finance.view"), async (req, res) => {
     const limit = Math.min(50, Math.max(1, Number.parseInt(req.query.limit, 10) || 20));
-    const rows = db.all(
-      "SELECT * FROM webhook_events WHERE provider = 'mercadopago' ORDER BY received_at DESC, rowid DESC LIMIT ?",
+    const rows = await db.all(
+      "SELECT * FROM webhook_events WHERE provider = 'mercadopago' ORDER BY received_at DESC, seq DESC LIMIT ?",
       [limit],
     );
-    const total = db.get("SELECT COUNT(*) AS n FROM webhook_events WHERE provider = 'mercadopago'").n;
+    const total = (await db.get("SELECT COUNT(*) AS n FROM webhook_events WHERE provider = 'mercadopago'")).n;
     res.json({
       items: rows.map((row) => ({
         id: row.id,
@@ -1068,36 +1069,36 @@ export default function commerceRoutes(ctx) {
 
   // --------------------------------------------------------------- client portal
 
-  router.get("/api/portal/billing", requireAuth, requireCap("portal.access"), (req, res) => {
+  router.get("/api/portal/billing", requireAuth, requireCap("portal.access"), async (req, res) => {
     const clientId = req.user.client_id;
-    const orders = db.all(
+    const orders = await db.all(
       `${ORDER_SELECT} WHERE o.client_id = ? AND o.status <> 'draft'
         ORDER BY CASE WHEN o.status IN ('pending_payment', 'failed') THEN 0 ELSE 1 END,
                  CASE WHEN o.status IN ('pending_payment', 'failed') THEN COALESCE(o.due_date, '9999-12-31') END,
                  o.created_at DESC`,
       [clientId],
     );
-    const subscriptions = db.all(`${SUBSCRIPTION_SELECT} WHERE sb.client_id = ? ORDER BY sb.created_at DESC`, [clientId]);
-    const payments = db.all(
+    const subscriptions = await db.all(`${SUBSCRIPTION_SELECT} WHERE sb.client_id = ? ORDER BY sb.created_at DESC`, [clientId]);
+    const payments = await db.all(
       `${PAYMENT_SELECT} WHERE p.client_id = ? AND (p.order_id IS NULL OR o.status <> 'draft')
         ORDER BY COALESCE(p.paid_at, p.updated_at) DESC LIMIT 100`,
       [clientId],
     );
     res.json({
-      orders: orders.map((row) => serializeOrder(req, row)),
-      subscriptions: subscriptions.map((row) => serializeSubscription(req, row)),
+      orders: await Promise.all(orders.map((row) => serializeOrder(req, row))),
+      subscriptions: await Promise.all(subscriptions.map((row) => serializeSubscription(req, row))),
       payments: payments.map((row) => serializePayment(req, row)),
       paymentsEnabled: mp.mpStatus(ctx.config).configured,
     });
   });
 
   router.post("/api/portal/orders/:id/pay", requireAuth, requireCap("portal.access"), async (req, res) => {
-    const row = getOrderRow(req.params.id);
+    const row = await getOrderRow(req.params.id);
     if (!row || row.client_id !== req.user.client_id || row.status === "draft") throw notFound("Não encontramos esta cobrança.");
     if (row.status === "paid") throw conflict("Esta cobrança já está paga.");
     if (!OPEN.has(row.status))
       throw conflict("Esta cobrança foi encerrada pela Metta. Fale com a equipe se precisar de uma nova.");
-    const gate = contractGate(ctx, { orderId: row.id, waived: Boolean(row.contract_waived_at) });
+    const gate = await contractGate(ctx, { orderId: row.id, waived: Boolean(row.contract_waived_at) });
     if (!gate.satisfied)
       throw conflict(
         gate.contract?.status === "sent"
@@ -1114,7 +1115,7 @@ export default function commerceRoutes(ctx) {
         throw upstream("Não foi possível abrir o pagamento no Mercado Pago agora. Tente de novo em instantes.");
       throw err;
     }
-    logActivity(req, {
+    await logActivity(req, {
       action: "order.checkout_opened",
       entityType: "order",
       entityId: row.id,
@@ -1122,7 +1123,7 @@ export default function commerceRoutes(ctx) {
       brandId: row.brand_id,
       summary: `${req.user.name} abriu o pagamento no Mercado Pago`,
     });
-    res.json({ checkoutUrl: result.url, order: serializeOrder(req, getOrderRow(row.id)) });
+    res.json({ checkoutUrl: result.url, order: await serializeOrder(req, await getOrderRow(row.id)) });
   });
 
   return router;

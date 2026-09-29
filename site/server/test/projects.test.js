@@ -18,14 +18,14 @@ const u = {};
 const a = {};
 const f = {};
 
-const notificationsOf = (userId, type) =>
-  ctx.db.all("SELECT * FROM notifications WHERE user_id = ? AND type = ? ORDER BY created_at", [userId, type]);
+const notificationsOf = async (userId, type) =>
+  await ctx.db.all("SELECT * FROM notifications WHERE user_id = ? AND type = ? ORDER BY created_at", [userId, type]);
 
 before(async () => {
   server = await startTestServer();
   ctx = server.ctx;
-  const one = createClientWithBrand(ctx, { name: "Cliente A", brandName: "Marca A" });
-  const two = createClientWithBrand(ctx, { name: "Cliente B", brandName: "Marca B" });
+  const one = await createClientWithBrand(ctx, { name: "Cliente A", brandName: "Marca A" });
+  const two = await createClientWithBrand(ctx, { name: "Cliente B", brandName: "Marca B" });
   Object.assign(f, { clientA: one.clientId, brandA: one.brandId, clientB: two.clientId, brandB: two.brandId });
 
   u.admin = await createUser(ctx, { role: "admin", name: "Admin" });
@@ -36,9 +36,9 @@ before(async () => {
   u.finance = await createUser(ctx, { role: "finance", name: "Financeiro" });
   u.clientA = await createUser(ctx, { role: "client", clientId: f.clientA, name: "Pessoa A" });
   u.clientB = await createUser(ctx, { role: "client", clientId: f.clientB, name: "Pessoa B" });
-  addStaffAccess(ctx, u.manager.id, f.clientA);
-  f.projectB = createProject(ctx, { brandId: f.brandB, name: "Projeto B", memberIds: [u.designer2.id] }).id;
-  f.service = ctx.db.get("SELECT id, name FROM services ORDER BY sort_order LIMIT 1");
+  await addStaffAccess(ctx, u.manager.id, f.clientA);
+  f.projectB = (await createProject(ctx, { brandId: f.brandB, name: "Projeto B", memberIds: [u.designer2.id] })).id;
+  f.service = await ctx.db.get("SELECT id, name FROM services ORDER BY sort_order LIMIT 1");
 
   for (const [key, user] of Object.entries(u)) a[key] = await login(server, { email: user.email });
 });
@@ -78,16 +78,16 @@ describe("projects", () => {
     assert.equal(res.body.emailConfigured, false);
     assert.equal(res.body.emailRecipients, 1);
 
-    const [notice] = notificationsOf(u.designer.id, "project.assigned");
+    const [notice] = await notificationsOf(u.designer.id, "project.assigned");
     assert.equal(notice.title, "Novo projeto atribuído");
     assert.equal(notice.link, `/admin/projetos/${project.id}`);
     // the author is not notified about their own action
-    assert.equal(notificationsOf(u.manager.id, "project.assigned").length, 0);
+    assert.equal((await notificationsOf(u.manager.id, "project.assigned")).length, 0);
     await ctx.mailer.idle();
-    const mail = ctx.db.get("SELECT * FROM email_outbox WHERE to_user_id = ? ORDER BY created_at DESC", [u.designer.id]);
+    const mail = await ctx.db.get("SELECT * FROM email_outbox WHERE to_user_id = ? ORDER BY created_at DESC", [u.designer.id]);
     assert.equal(mail.subject, "Novo projeto atribuído");
     assert.match(mail.text_body, /Identidade visual 2026/);
-    const logged = ctx.db.get("SELECT * FROM activity_log WHERE action = 'project.created' AND entity_id = ?", [project.id]);
+    const logged = await ctx.db.get("SELECT * FROM activity_log WHERE action = 'project.created' AND entity_id = ?", [project.id]);
     assert.equal(logged.client_id, f.clientA);
   });
 
@@ -161,13 +161,13 @@ describe("projects", () => {
     res = await a.manager.patch(`/api/projects/${f.projectA}`, { status: "in_review", dueDate: "2026-12-01" });
     assert.equal(res.body.project.deliveredAt, null);
     assert.equal(res.body.project.dueDate, "2026-12-01");
-    const moved = ctx.db.all("SELECT visibility FROM activity_log WHERE action = 'project.status_changed' AND entity_id = ?", [f.projectA]);
+    const moved = await ctx.db.all("SELECT visibility FROM activity_log WHERE action = 'project.status_changed' AND entity_id = ?", [f.projectA]);
     assert.equal(moved.length, 2);
     assert.ok(moved.every((row) => row.visibility === "client"));
   });
 
   test("members replace notifies only the people who joined", async () => {
-    const before = notificationsOf(u.designer.id, "project.assigned").length;
+    const before = (await notificationsOf(u.designer.id, "project.assigned")).length;
     const res = await a.manager.put(`/api/projects/${f.projectA}/members`, {
       members: [
         { userId: u.manager.id, role: "lead" },
@@ -178,8 +178,8 @@ describe("projects", () => {
     assert.equal(res.status, 200);
     assert.deepEqual(res.body.added, [u.designer2.id]);
     assert.deepEqual(res.body.changed, [u.designer.id]);
-    assert.equal(notificationsOf(u.designer.id, "project.assigned").length, before);
-    assert.equal(notificationsOf(u.designer2.id, "project.assigned").length, 1);
+    assert.equal((await notificationsOf(u.designer.id, "project.assigned")).length, before);
+    assert.equal((await notificationsOf(u.designer2.id, "project.assigned")).length, 1);
     const designer2 = await login(server, { email: u.designer2.email });
     assert.equal((await designer2.get(`/api/projects/${f.projectA}`)).status, 200);
     assert.equal((await a.designer.put(`/api/projects/${f.projectA}/members`, { members: [] })).status, 403);
@@ -191,11 +191,11 @@ describe("projects", () => {
 
   test("members replace reports the in-app and e-mail reach of the notices", async () => {
     // own client, so the portal checks below keep their fixtures
-    const other = createClientWithBrand(ctx, { name: "Cliente Avisos", brandName: "Marca Avisos" });
+    const other = await createClientWithBrand(ctx, { name: "Cliente Avisos", brandName: "Marca Avisos" });
     const quiet = await createUser(ctx, { role: "designer", name: "Designer Silenciosa" });
-    ctx.db.run("UPDATE users SET notify_email = 0 WHERE id = ?", [quiet.id]);
+    await ctx.db.run("UPDATE users SET notify_email = 0 WHERE id = ?", [quiet.id]);
     const invited = await createUser(ctx, { role: "designer", name: "Designer Convidado", status: "invited" });
-    const project = createProject(ctx, { brandId: other.brandId, name: "Alcance dos avisos" }).id;
+    const project = (await createProject(ctx, { brandId: other.brandId, name: "Alcance dos avisos" })).id;
     const configured = ctx.mailer.isConfigured;
     try {
       // without SMTP: in-app only, whatever the preferences
@@ -242,7 +242,7 @@ describe("tasks", () => {
     const first = res.body.task;
     assert.equal(first.status, "todo");
     assert.equal(first.assignee.id, u.designer2.id);
-    const [notice] = notificationsOf(u.designer2.id, "task.assigned");
+    const [notice] = await notificationsOf(u.designer2.id, "task.assigned");
     assert.equal(notice.title, "Nova tarefa atribuída");
     assert.equal(notice.link, `/admin/projetos/${f.projectA}?tarefa=${first.id}`);
 
@@ -263,7 +263,7 @@ describe("tasks", () => {
     res = await a.designer2.patch(`/api/tasks/${first.id}`, { status: "review", sortOrder: 0 });
     assert.equal(res.status, 200);
     assert.equal(res.body.task.status, "review");
-    assert.ok(notificationsOf(u.manager.id, "task.review").length >= 1);
+    assert.ok((await notificationsOf(u.manager.id, "task.review")).length >= 1);
     res = await a.designer2.patch(`/api/tasks/${first.id}`, { status: "done" });
     assert.ok(res.body.task.completedAt);
     res = await a.designer2.patch(`/api/tasks/${first.id}`, { status: "doing" });
@@ -276,7 +276,7 @@ describe("tasks", () => {
     // reassigning notifies the new person
     res = await a.manager.patch(`/api/tasks/${third.id}`, { assigneeId: u.designer.id, title: "Paleta de cores" });
     assert.equal(res.body.task.assignee.id, u.designer.id);
-    assert.ok(notificationsOf(u.designer.id, "task.assigned").some((n) => n.body.startsWith("Paleta de cores")));
+    assert.ok((await notificationsOf(u.designer.id, "task.assigned")).some((n) => n.body.startsWith("Paleta de cores")));
 
     // designers delete only what they created; managers anything
     assert.equal((await a.designer.del(`/api/tasks/${second.id}`)).status, 403);
@@ -318,14 +318,14 @@ describe("portal projects", () => {
       visibility: "released",
       requiresApproval: false,
     });
-    ctx.db.run("UPDATE projects SET internal_notes = 'nota interna' WHERE id = ?", [f.projectA]);
+    await ctx.db.run("UPDATE projects SET internal_notes = 'nota interna' WHERE id = ?", [f.projectA]);
     const at = new Date().toISOString();
-    ctx.db.run(
+    await ctx.db.run(
       "INSERT INTO kits (id, brand_id, project_id, name, kind, status, released_at, created_at, updated_at) VALUES ('kit_AAAAAAAAAAAAAAAA', ?, ?, 'Pacote final', 'project_package', 'released', ?, ?, ?)",
       [f.brandA, f.projectA, at, at, at],
     );
-    const released = ctx.db.get("SELECT id FROM materials WHERE project_id = ? AND visibility = 'released'", [f.projectA]);
-    ctx.db.run("INSERT INTO kit_items (kit_id, material_id, sort_order) VALUES ('kit_AAAAAAAAAAAAAAAA', ?, 0)", [released.id]);
+    const released = await ctx.db.get("SELECT id FROM materials WHERE project_id = ? AND visibility = 'released'", [f.projectA]);
+    await ctx.db.run("INSERT INTO kit_items (kit_id, material_id, sort_order) VALUES ('kit_AAAAAAAAAAAAAAAA', ?, 0)", [released.id]);
 
     let res = await a.clientA.get("/api/portal/projects");
     assert.equal(res.status, 200);

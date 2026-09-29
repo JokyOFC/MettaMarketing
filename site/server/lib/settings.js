@@ -1,6 +1,6 @@
 import { now } from "./time.js";
 
-// Values in the settings table are stored as JSON text.
+// Values in the settings table are stored as JSON text, one row per name.
 export const DEFAULT_SETTINGS = {
   orgName: "Metta Marketing",
   supportEmail: "suporte@mettamkt.com.br",
@@ -8,8 +8,8 @@ export const DEFAULT_SETTINGS = {
   zipRetentionHours: 24,
 };
 
-export function getSetting(db, key, fallback = DEFAULT_SETTINGS[key]) {
-  const row = db.get("SELECT value FROM settings WHERE key = ?", [key]);
+export async function getSetting(db, key, fallback = DEFAULT_SETTINGS[key]) {
+  const row = await db.get("SELECT value FROM settings WHERE name = ?", [key]);
   if (!row || row.value === null) return fallback;
   try {
     return JSON.parse(row.value);
@@ -19,22 +19,22 @@ export function getSetting(db, key, fallback = DEFAULT_SETTINGS[key]) {
 }
 
 // -> { ...DEFAULT_SETTINGS, ...stored }
-export function getSettings(db) {
+export async function getSettings(db) {
   const out = { ...DEFAULT_SETTINGS };
-  for (const row of db.all("SELECT key, value FROM settings")) {
+  for (const row of await db.all("SELECT name, value FROM settings")) {
     try {
-      out[row.key] = JSON.parse(row.value);
+      out[row.name] = JSON.parse(row.value);
     } catch {
-      out[row.key] = row.value;
+      out[row.name] = row.value;
     }
   }
   return out;
 }
 
-export function setSetting(db, key, value, userId = null) {
-  db.run(
-    `INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?, ?, ?, ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+export async function setSetting(db, key, value, userId = null) {
+  await db.run(
+    `INSERT INTO settings (name, value, updated_by, updated_at) VALUES (?, ?, ?, ?) AS incoming
+     ON DUPLICATE KEY UPDATE value = incoming.value, updated_by = incoming.updated_by, updated_at = incoming.updated_at`,
     [key, JSON.stringify(value), userId, now()],
   );
 }

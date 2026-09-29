@@ -13,11 +13,11 @@ export async function runMaintenance(ctx) {
   return { zips, uploads, tmp };
 }
 
-export function register(jobs, ctx) {
+export async function register(jobs, ctx) {
   jobs.register("zips", (payload) => runZipJob(ctx, payload?.jobId), { concurrency: 2 });
 
   try {
-    const failed = failInterruptedZips(ctx);
+    const failed = await failInterruptedZips(ctx);
     if (failed) ctx.log?.warn?.(`[zips] ${failed} job(s) interrupted by the restart were marked as failed.`);
   } catch (err) {
     ctx.log?.warn?.(`[zips] could not check interrupted jobs: ${err.message}`);

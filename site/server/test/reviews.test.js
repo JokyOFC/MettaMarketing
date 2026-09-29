@@ -25,18 +25,18 @@ const INTERNAL = "Nota interna: margem do slide 2 está apertada";
 
 // Simulates what slice A's release does for a new version: v(n+1) released,
 // the previous released version superseded, approval back to pending.
-function releaseNewVersion(materialId, number) {
+async function releaseNewVersion(materialId, number) {
   const db = ctx.db;
-  const material = db.get("SELECT * FROM materials WHERE id = ?", [materialId]);
+  const material = await db.get("SELECT * FROM materials WHERE id = ?", [materialId]);
   const id = newId("ver");
   const at = now();
-  db.run(
+  await db.run(
     `INSERT INTO material_versions (id, material_id, number, status, change_summary, created_by, created_at, released_at, released_by)
      VALUES (?, ?, ?, 'released', 'Ajustes do cliente', ?, ?, ?, ?)`,
     [id, materialId, number, u.designer.id, at, at, u.manager.id],
   );
-  db.run("UPDATE material_versions SET status = 'superseded' WHERE id = ?", [material.released_version_id]);
-  db.run(
+  await db.run("UPDATE material_versions SET status = 'superseded' WHERE id = ?", [material.released_version_id]);
+  await db.run(
     `UPDATE materials SET current_version_id = ?, released_version_id = ?, approval_status = 'pending', updated_at = ? WHERE id = ?`,
     [id, id, at, materialId],
   );
@@ -46,8 +46,8 @@ function releaseNewVersion(materialId, number) {
 before(async () => {
   server = await startTestServer();
   ctx = server.ctx;
-  const a = createClientWithBrand(ctx, { name: "Cliente A", brandName: "Marca A" });
-  const b = createClientWithBrand(ctx, { name: "Cliente B", brandName: "Marca B" });
+  const a = await createClientWithBrand(ctx, { name: "Cliente A", brandName: "Marca A" });
+  const b = await createClientWithBrand(ctx, { name: "Cliente B", brandName: "Marca B" });
   Object.assign(f, { clientA: a.clientId, brandA: a.brandId, brandB: b.brandId });
   u.admin = await createUser(ctx, { role: "admin", name: "Admin" });
   u.manager = await createUser(ctx, { role: "manager", name: "Gestora A" });
@@ -57,9 +57,9 @@ before(async () => {
   u.clientA = await createUser(ctx, { role: "client", clientId: a.clientId, name: "Ana Cliente" });
   u.clientA2 = await createUser(ctx, { role: "client", clientId: a.clientId, name: "Beto Cliente" });
   u.clientB = await createUser(ctx, { role: "client", clientId: b.clientId, name: "Bia Cliente" });
-  addStaffAccess(ctx, u.manager.id, a.clientId);
-  addStaffAccess(ctx, u.managerB.id, b.clientId);
-  f.project = createProject(ctx, { brandId: a.brandId, memberIds: [u.designer.id] }).id;
+  await addStaffAccess(ctx, u.manager.id, a.clientId);
+  await addStaffAccess(ctx, u.managerB.id, b.clientId);
+  f.project = (await createProject(ctx, { brandId: a.brandId, memberIds: [u.designer.id] })).id;
 
   const slide = await png();
   const post = await insertMaterial(ctx, {
@@ -119,11 +119,11 @@ describe("comments", () => {
     assert.equal(res.body.comment.author.isClient, true);
     assert.equal(res.body.comment.mine, true);
     f.clientComment = res.body.comment.id;
-    const row = ctx.db.get("SELECT visibility FROM comments WHERE id = ?", [f.clientComment]);
+    const row = await ctx.db.get("SELECT visibility FROM comments WHERE id = ?", [f.clientComment]);
     assert.equal(row.visibility, "client");
     // the team is notified
-    assert.ok(ctx.db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'comment.client'", [u.designer.id]));
-    assert.ok(ctx.db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'comment.client'", [u.manager.id]));
+    assert.ok(await ctx.db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'comment.client'", [u.designer.id]));
+    assert.ok(await ctx.db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'comment.client'", [u.manager.id]));
   });
 
   test("internal notes never reach clients, not even as counts", async () => {
@@ -138,7 +138,7 @@ describe("comments", () => {
     });
     assert.equal(reply.status, 201);
     assert.equal(reply.body.comment.visibility, "client");
-    assert.ok(ctx.db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'comment.team'", [u.clientA.id]));
+    assert.ok(await ctx.db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'comment.team'", [u.clientA.id]));
 
     const badParent = await as.manager.post(`/api/materials/${f.post}/comments`, { body: "x", parentId: f.internal });
     assert.equal(badParent.status, 422);
@@ -167,7 +167,7 @@ describe("comments", () => {
 
   test("client-visible comments on unreleased versions stay hidden from clients", async () => {
     const draftVersion = newId("ver");
-    ctx.db.run(
+    await ctx.db.run(
       "INSERT INTO material_versions (id, material_id, number, status, created_by, created_at) VALUES (?, ?, 9, 'draft', ?, ?)",
       [draftVersion, f.post, u.designer.id, now()],
     );
@@ -176,8 +176,8 @@ describe("comments", () => {
     const client = await as.clientA.get(`/api/materials/${f.post}/comments`);
     assert.equal(client.body.items.some((c) => c.id === res.body.comment.id), false);
     assert.equal((await as.clientA.post(`/api/materials/${f.post}/comments`, { body: "x", versionId: draftVersion })).status, 422);
-    ctx.db.run("DELETE FROM comments WHERE id = ?", [res.body.comment.id]);
-    ctx.db.run("DELETE FROM material_versions WHERE id = ?", [draftVersion]);
+    await ctx.db.run("DELETE FROM comments WHERE id = ?", [res.body.comment.id]);
+    await ctx.db.run("DELETE FROM material_versions WHERE id = ?", [draftVersion]);
   });
 
   test("team messages follow the released version; talk about an unreleased version never reaches the client", async () => {
@@ -193,15 +193,15 @@ describe("comments", () => {
     const v1 = logo.version.id;
     // v2 in preparation: current version, never released
     const v2 = newId("ver");
-    ctx.db.run(
+    await ctx.db.run(
       "INSERT INTO material_versions (id, material_id, number, status, created_by, created_at) VALUES (?, ?, 2, 'draft', ?, ?)",
       [v2, materialId, u.designer.id, now()],
     );
-    ctx.db.run("UPDATE materials SET current_version_id = ? WHERE id = ?", [v2, materialId]);
-    const clientNotes = () =>
-      ctx.db.all("SELECT * FROM notifications WHERE user_id = ? AND entity_id = ? ORDER BY created_at, rowid", [u.clientA.id, materialId]);
-    const emailsWith = (text) =>
-      ctx.db.get("SELECT COUNT(*) AS n FROM email_outbox WHERE to_email = ? AND text_body LIKE ?", [u.clientA.email.toLowerCase(), `%${text}%`]).n;
+    await ctx.db.run("UPDATE materials SET current_version_id = ? WHERE id = ?", [v2, materialId]);
+    const clientNotes = async () =>
+      await ctx.db.all("SELECT * FROM notifications WHERE user_id = ? AND entity_id = ? ORDER BY created_at, seq", [u.clientA.id, materialId]);
+    const emailsWith = async (text) =>
+      (await ctx.db.get("SELECT COUNT(*) AS n FROM email_outbox WHERE to_email = ? AND text_body LIKE ?", [u.clientA.email.toLowerCase(), `%${text}%`])).n;
 
     // No versionId: a client-visible message goes to v1, the version the client sees.
     const visible = await as.manager.post(`/api/materials/${materialId}/comments`, { body: "Mensagem sobre a versão 1" });
@@ -210,14 +210,14 @@ describe("comments", () => {
     assert.equal(visible.body.comment.versionNumber, 1);
     const seen = await as.clientA.get(`/api/materials/${materialId}/comments`);
     assert.ok(seen.body.items.some((c) => c.id === visible.body.comment.id));
-    const [note] = clientNotes();
+    const [note] = await clientNotes();
     assert.equal(note.type, "comment.team");
     // files open their drawer in Arquivos on the conversation
     assert.equal(note.link, `/painel/arquivos?material=${materialId}#comentarios`);
-    const logged = ctx.db.get("SELECT visibility FROM activity_log WHERE entity_id = ?", [visible.body.comment.id]);
+    const logged = await ctx.db.get("SELECT visibility FROM activity_log WHERE entity_id = ?", [visible.body.comment.id]);
     assert.equal(logged.visibility, "client");
     await ctx.mailer.idle?.();
-    assert.equal(emailsWith("Mensagem sobre a versão 1"), 1);
+    assert.equal(await emailsWith("Mensagem sobre a versão 1"), 1);
 
     // Explicitly about the draft v2: stored, but the client neither sees it
     // nor is notified or e-mailed, and the history entry stays internal.
@@ -231,10 +231,10 @@ describe("comments", () => {
     const after = await as.clientA.get(`/api/materials/${materialId}/comments`);
     assert.equal(after.body.items.some((c) => c.id === hidden.body.comment.id), false);
     assert.equal(JSON.stringify(after.body).includes("Rascunho da versão 2"), false);
-    assert.equal(clientNotes().length, 1);
+    assert.equal((await clientNotes()).length, 1);
     await ctx.mailer.idle?.();
-    assert.equal(emailsWith("Rascunho da versão 2"), 0);
-    const internalLog = ctx.db.get("SELECT visibility FROM activity_log WHERE entity_id = ?", [hidden.body.comment.id]);
+    assert.equal(await emailsWith("Rascunho da versão 2"), 0);
+    const internalLog = await ctx.db.get("SELECT visibility FROM activity_log WHERE entity_id = ?", [hidden.body.comment.id]);
     assert.equal(internalLog.visibility, "internal");
     const portal = await as.clientA.get("/api/portal/activity");
     if (portal.status === 200) assert.equal(JSON.stringify(portal.body).includes(hidden.body.comment.id), false);
@@ -244,8 +244,8 @@ describe("comments", () => {
     assert.equal(internal.body.comment.versionId, v2);
 
     // Once v2 is released to the client, the earlier message becomes visible.
-    ctx.db.run("UPDATE material_versions SET status = 'released', released_at = ? WHERE id = ?", [now(), v2]);
-    ctx.db.run("UPDATE materials SET released_version_id = ? WHERE id = ?", [v2, materialId]);
+    await ctx.db.run("UPDATE material_versions SET status = 'released', released_at = ? WHERE id = ?", [now(), v2]);
+    await ctx.db.run("UPDATE materials SET released_version_id = ? WHERE id = ?", [v2, materialId]);
     const released = await as.clientA.get(`/api/materials/${materialId}/comments`);
     assert.ok(released.body.items.some((c) => c.id === hidden.body.comment.id));
     assert.equal(released.body.items.some((c) => c.id === internal.body.comment.id), false);
@@ -308,29 +308,29 @@ describe("decisions", () => {
     assert.equal(res.body.approval.decision, "changes_requested");
     assert.equal(res.body.approval.ip, undefined);
 
-    const version = ctx.db.get("SELECT * FROM material_versions WHERE id = ?", [f.v1]);
+    const version = await ctx.db.get("SELECT * FROM material_versions WHERE id = ?", [f.v1]);
     assert.equal(version.status, "changes_requested");
     assert.equal(version.decided_by, u.clientA.id);
-    const decision = ctx.db.get("SELECT * FROM approvals WHERE material_id = ?", [f.post]);
+    const decision = await ctx.db.get("SELECT * FROM approvals WHERE material_id = ?", [f.post]);
     assert.equal(decision.decision, "changes_requested");
     assert.equal(decision.user_id, u.clientA.id);
     assert.equal(decision.user_agent, "TesteNavegador/1.0");
     assert.ok(decision.ip);
     assert.equal(decision.comment_id, res.body.comment.id);
 
-    const task = ctx.db.get("SELECT * FROM tasks WHERE material_id = ?", [f.post]);
+    const task = await ctx.db.get("SELECT * FROM tasks WHERE material_id = ?", [f.post]);
     assert.equal(task.project_id, f.project);
     assert.equal(task.assignee_id, u.designer.id);
     assert.equal(task.status, "todo");
     assert.match(task.description, /slide 2/);
 
     for (const id of [u.designer.id, u.manager.id])
-      assert.ok(ctx.db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'approval.changes_requested'", [id]));
+      assert.ok(await ctx.db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'approval.changes_requested'", [id]));
     assert.equal(
-      ctx.db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'approval.changes_requested'", [u.managerB.id]),
+      await ctx.db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'approval.changes_requested'", [u.managerB.id]),
       undefined,
     );
-    const activity = ctx.db.get("SELECT * FROM activity_log WHERE material_id = ? AND action = 'material.changes_requested'", [f.post]);
+    const activity = await ctx.db.get("SELECT * FROM activity_log WHERE material_id = ? AND action = 'material.changes_requested'", [f.post]);
     assert.equal(activity.visibility, "client");
 
     const again = await as.clientA.post(`/api/materials/${f.post}/request-changes`, { versionId: f.v1, body: "Mais uma coisa" });
@@ -338,7 +338,7 @@ describe("decisions", () => {
   });
 
   test("a new released version needs a new decision; the old version is refused", async () => {
-    f.v2 = releaseNewVersion(f.post, 2);
+    f.v2 = await releaseNewVersion(f.post, 2);
     const old = await as.clientA.post(`/api/materials/${f.post}/approve`, { versionId: f.v1 });
     assert.equal(old.status, 409);
     const oldChanges = await as.clientA.post(`/api/materials/${f.post}/request-changes`, { versionId: f.v1, body: "x" });
@@ -351,18 +351,18 @@ describe("decisions", () => {
     assert.equal(res.body.approval.versionNumber, 2);
     assert.equal(res.body.approval.user.name, "Ana Cliente");
 
-    const version = ctx.db.get("SELECT * FROM material_versions WHERE id = ?", [f.v2]);
+    const version = await ctx.db.get("SELECT * FROM material_versions WHERE id = ?", [f.v2]);
     assert.equal(version.status, "approved");
     assert.equal(version.decided_by, u.clientA.id);
     assert.ok(version.decided_at);
     // the earlier decision stays in the log
-    assert.equal(ctx.db.get("SELECT COUNT(*) AS n FROM approvals WHERE material_id = ?", [f.post]).n, 2);
-    const noteRow = ctx.db.get("SELECT * FROM comments WHERE material_id = ? AND kind = 'approval_note'", [f.post]);
+    assert.equal((await ctx.db.get("SELECT COUNT(*) AS n FROM approvals WHERE material_id = ?", [f.post])).n, 2);
+    const noteRow = await ctx.db.get("SELECT * FROM comments WHERE material_id = ? AND kind = 'approval_note'", [f.post]);
     assert.equal(noteRow.visibility, "client");
-    const activity = ctx.db.get("SELECT * FROM activity_log WHERE material_id = ? AND action = 'material.approved'", [f.post]);
+    const activity = await ctx.db.get("SELECT * FROM activity_log WHERE material_id = ? AND action = 'material.approved'", [f.post]);
     assert.equal(activity.visibility, "client");
     assert.match(activity.summary, /aprovou a versão 2/);
-    assert.ok(ctx.db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'approval.approved'", [u.designer.id]));
+    assert.ok(await ctx.db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'approval.approved'", [u.designer.id]));
 
     assert.equal((await as.clientA2.post(`/api/materials/${f.post}/approve`, { versionId: f.v2 })).status, 409);
   });
@@ -382,7 +382,7 @@ describe("decisions", () => {
     });
     assert.equal(changes.status, 200);
     // no project: no task
-    assert.equal(ctx.db.get("SELECT 1 FROM tasks WHERE material_id = ?", [other.material.id]), undefined);
+    assert.equal(await ctx.db.get("SELECT 1 FROM tasks WHERE material_id = ?", [other.material.id]), undefined);
     const approve = await as.clientA.post(`/api/materials/${other.material.id}/approve`, { versionId: other.version.id });
     assert.equal(approve.status, 200);
     assert.equal(approve.body.material.approvalStatus, "approved");
@@ -429,7 +429,7 @@ describe("approval queue", () => {
 
     assert.equal((await as.managerB.get("/api/approvals?status=approved")).body.total, 0);
 
-    releaseNewVersion(f.post, 3);
+    await releaseNewVersion(f.post, 3);
     const pending = await as.manager.get("/api/approvals");
     assert.deepEqual(pending.body.items.map((item) => item.id), [f.post]);
     assert.equal(pending.body.items[0].reviewVersion.number, 3);

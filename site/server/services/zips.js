@@ -81,9 +81,9 @@ function selectionName(rows, entries, { brandName, requested }) {
 }
 
 // Rows of the viewer's scope matching an extra WHERE (active materials only).
-function scopedRows(req, where, params) {
+async function scopedRows(req, where, params) {
   const s = scopeSql.materials(req, "m", "b");
-  return req.ctx.db.all(`${MATERIAL_SELECT} WHERE ${where} AND m.archived_at IS NULL AND ${s.sql}`, [...params, ...s.params]);
+  return await req.ctx.db.all(`${MATERIAL_SELECT} WHERE ${where} AND m.archived_at IS NULL AND ${s.sql}`, [...params, ...s.params]);
 }
 
 // Two entry lists built separately may share a path: keep the first, suffix the rest.
@@ -111,7 +111,7 @@ function mergeEntries(lists) {
  * only visible, downloadable files — editables only when included, fonts only
  * when distributable). Selected files that cannot be downloaded answer 403.
  */
-export function resolveZipScope(req, scope) {
+export async function resolveZipScope(req, scope) {
   const { db } = req.ctx;
   const includeEditables = scope.includeEditables !== false;
   let entries;
@@ -124,13 +124,14 @@ export function resolveZipScope(req, scope) {
       const fileIds = unique(scope.fileIds);
       const materialIds = unique(scope.materialIds);
       if (!fileIds.length && !materialIds.length) throw validation({ "scope.fileIds": "Selecione pelo menos um arquivo." });
-      const files = fileIds.map((fileId) => assertFile(req, fileId, { download: true }));
-      for (const materialId of materialIds) assertMaterial(req, materialId);
-      const fileRows = loadMaterialRows(db, files.map((f) => f.material_id));
-      const materialRows = loadMaterialRows(db, materialIds);
+      const files = [];
+      for (const fileId of fileIds) files.push(await assertFile(req, fileId, { download: true }));
+      for (const materialId of materialIds) await assertMaterial(req, materialId);
+      const fileRows = await loadMaterialRows(db, files.map((f) => f.material_id));
+      const materialRows = await loadMaterialRows(db, materialIds);
       entries = mergeEntries([
-        zipEntries(req, fileRows, { fileIds }),
-        zipEntries(req, materialRows, { includeEditables }),
+        await zipEntries(req, fileRows, { fileIds }),
+        await zipEntries(req, materialRows, { includeEditables }),
       ]);
       const rows = [...fileRows, ...materialRows];
       const brands = new Set(rows.map((row) => row.brand_id));
@@ -139,45 +140,45 @@ export function resolveZipScope(req, scope) {
       break;
     }
     case "category": {
-      brand = assertBrand(req, scope.brandId);
-      const category = db.get("SELECT * FROM categories WHERE id = ?", [scope.categoryId]);
+      brand = await assertBrand(req, scope.brandId);
+      const category = await db.get("SELECT * FROM categories WHERE id = ?", [scope.categoryId]);
       if (!category) throw notFound();
-      const rows = scopedRows(req, "m.brand_id = ? AND m.category_id = ?", [brand.id, category.id]);
-      entries = zipEntries(req, rows, { includeEditables });
+      const rows = await scopedRows(req, "m.brand_id = ? AND m.category_id = ?", [brand.id, category.id]);
+      entries = await zipEntries(req, rows, { includeEditables });
       label = `${category.name} · ${brand.name}`;
       filename = zipFilename(brand.name, category.name);
       break;
     }
     case "brand_kit": {
-      brand = assertBrand(req, scope.brandId);
-      const rows = scopedRows(req, "m.brand_id = ? AND cat.area = 'identity'", [brand.id]);
-      entries = zipEntries(req, rows, { includeEditables });
+      brand = await assertBrand(req, scope.brandId);
+      const rows = await scopedRows(req, "m.brand_id = ? AND cat.area = 'identity'", [brand.id]);
+      entries = await zipEntries(req, rows, { includeEditables });
       label = `Kit de marca · ${brand.name}`;
       filename = zipFilename(brand.name, "kit de marca");
       break;
     }
     case "carousel": {
-      assertMaterial(req, scope.materialId);
-      const [row] = loadMaterialRows(db, [scope.materialId]);
+      await assertMaterial(req, scope.materialId);
+      const [row] = await loadMaterialRows(db, [scope.materialId]);
       brand = { id: row.brand_id, name: row.brand_name, client_id: row.client_id };
-      entries = zipEntries(req, [row], { layout: "carousel", root: `${row.brand_name} - ${row.title}`, includeEditables });
+      entries = await zipEntries(req, [row], { layout: "carousel", root: `${row.brand_name} - ${row.title}`, includeEditables });
       label = `Carrossel · ${row.title}`;
       filename = zipFilename(row.brand_name, row.title);
       break;
     }
     case "project": {
-      const project = assertProject(req, scope.projectId);
-      brand = db.get("SELECT * FROM brands WHERE id = ?", [project.brand_id]);
-      const rows = scopedRows(req, "m.project_id = ?", [project.id]);
-      entries = zipEntries(req, rows, { root: `${brand.name} - ${project.name}`, includeEditables });
+      const project = await assertProject(req, scope.projectId);
+      brand = await db.get("SELECT * FROM brands WHERE id = ?", [project.brand_id]);
+      const rows = await scopedRows(req, "m.project_id = ?", [project.id]);
+      entries = await zipEntries(req, rows, { root: `${brand.name} - ${project.name}`, includeEditables });
       label = `Pacote final · ${project.name}`;
       filename = zipFilename(brand.name, project.name);
       break;
     }
     case "kit": {
-      const kit = assertKit(req, scope.kitId);
+      const kit = await assertKit(req, scope.kitId);
       brand = { id: kit.brand_id, name: kit.brand_name, client_id: kit.client_id };
-      entries = zipEntries(req, kitMaterialRows(req, kit.id), { root: `${kit.brand_name} - ${kit.name}`, includeEditables });
+      entries = await zipEntries(req, await kitMaterialRows(req, kit.id), { root: `${kit.brand_name} - ${kit.name}`, includeEditables });
       label = `Kit · ${kit.name}`;
       filename = zipFilename(kit.brand_name, kit.name);
       break;
@@ -194,8 +195,8 @@ export function resolveZipScope(req, scope) {
 
 // ------------------------------------------------------------------- jobs
 
-export function zipRetentionHours(ctx) {
-  const value = Number(getSetting(ctx.db, "zipRetentionHours", ctx.config.zipRetentionHours));
+export async function zipRetentionHours(ctx) {
+  const value = Number(await getSetting(ctx.db, "zipRetentionHours", ctx.config.zipRetentionHours));
   return Number.isFinite(value) && value > 0 ? Math.min(Math.max(value, 1), 24 * 30) : 24;
 }
 
@@ -244,7 +245,7 @@ function stableScope(scope) {
  */
 export async function createZipJob(req, scope) {
   const { db, jobs, storage } = req.ctx;
-  const resolved = resolveZipScope(req, scope);
+  const resolved = await resolveZipScope(req, scope);
   const entries = resolved.entries.map((e) => ({ f: e.fileId, m: e.materialId, p: e.path, s: e.store ? 1 : 0, n: e.sizeBytes }));
   const entriesJson = JSON.stringify(entries);
   const hash = createHash("sha256")
@@ -254,20 +255,20 @@ export async function createZipJob(req, scope) {
     .digest("hex");
   const at = now();
 
-  const existing = db.get(
+  const existing = await db.get(
     `SELECT * FROM zip_jobs WHERE user_id = ? AND entries_hash = ? AND status IN ('queued', 'running', 'ready')
        AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC LIMIT 1`,
     [req.user.id, hash, at],
   );
   if (existing && (existing.status !== "ready" || (existing.storage_key && (await storage.exists(existing.storage_key)))))
     return existing;
-  const active = db.get("SELECT COUNT(*) AS n FROM zip_jobs WHERE user_id = ? AND status IN ('queued', 'running')", [req.user.id]).n;
+  const active = (await db.get("SELECT COUNT(*) AS n FROM zip_jobs WHERE user_id = ? AND status IN ('queued', 'running')", [req.user.id])).n;
   if (active >= MAX_ACTIVE_PER_USER)
     throw rateLimited("Você já tem pacotes sendo preparados. Aguarde um deles terminar para pedir outro.");
 
   const jobId = newId("zip");
   const { type, ...rest } = scope;
-  db.run(
+  await db.run(
     `INSERT INTO zip_jobs (id, user_id, client_id, brand_id, scope, label, filename, status, file_count, total_bytes,
        processed_bytes, entries, entries_hash, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, ?, ?, ?)`,
@@ -287,12 +288,12 @@ export async function createZipJob(req, scope) {
     ],
   );
   jobs?.enqueue("zips", { jobId });
-  return db.get("SELECT * FROM zip_jobs WHERE id = ?", [jobId]);
+  return await db.get("SELECT * FROM zip_jobs WHERE id = ?", [jobId]);
 }
 
 // Owner-only lookup (404 for anybody else).
-export function assertZipJob(req, jobId) {
-  const row = jobId ? req.ctx.db.get("SELECT * FROM zip_jobs WHERE id = ? AND user_id = ?", [jobId, req.user.id]) : null;
+export async function assertZipJob(req, jobId) {
+  const row = jobId ? await req.ctx.db.get("SELECT * FROM zip_jobs WHERE id = ? AND user_id = ?", [jobId, req.user.id]) : null;
   if (!row) throw notFound();
   return row;
 }
@@ -314,7 +315,7 @@ export const ZIP_GONE_MESSAGE = "Este ZIP não está mais disponível. Gere o pa
  * still downloadable by this user, and the stored ZIP still there.
  */
 export async function zipLinkProblem(req, row) {
-  if (!zipStillAllowed(req, row)) return ZIP_CHANGED_MESSAGE;
+  if (!await zipStillAllowed(req, row)) return ZIP_CHANGED_MESSAGE;
   if (!row.storage_key || !(await req.ctx.storage.exists(row.storage_key))) return ZIP_GONE_MESSAGE;
   return null;
 }
@@ -326,7 +327,7 @@ export async function zipLinkProblem(req, row) {
  */
 export async function retireZipJob(ctx, row, message) {
   try {
-    ctx.db.run("UPDATE zip_jobs SET status = 'expired', storage_key = NULL, error = ? WHERE id = ? AND status = 'ready'", [
+    await ctx.db.run("UPDATE zip_jobs SET status = 'expired', storage_key = NULL, error = ? WHERE id = ? AND status = 'ready'", [
       message,
       row.id,
     ]);
@@ -340,11 +341,11 @@ export async function retireZipJob(ctx, row, message) {
  * Re-checks, at download time, that every file of the package is still
  * downloadable by this user. -> true | false
  */
-export function zipStillAllowed(req, row) {
+export async function zipStillAllowed(req, row) {
   const entries = parseJson(row.entries, []);
   for (const entry of entries) {
     try {
-      assertFile(req, entry.f, { download: true });
+      await assertFile(req, entry.f, { download: true });
     } catch {
       return false;
     }
@@ -414,9 +415,9 @@ function writeArchive(ctx, entries, target, { totalBytes, onBytes }) {
  */
 export async function runZipJob(ctx, jobId) {
   const { db, storage } = ctx;
-  const job = db.get("SELECT * FROM zip_jobs WHERE id = ?", [jobId]);
+  const job = await db.get("SELECT * FROM zip_jobs WHERE id = ?", [jobId]);
   if (!job || job.status !== "queued") return null;
-  const started = db.run("UPDATE zip_jobs SET status = 'running', started_at = ?, processed_bytes = 0 WHERE id = ? AND status = 'queued'", [
+  const started = await db.run("UPDATE zip_jobs SET status = 'running', started_at = ?, processed_bytes = 0 WHERE id = ? AND status = 'queued'", [
     now(),
     jobId,
   ]);
@@ -430,7 +431,7 @@ export async function runZipJob(ctx, jobId) {
     const files = new Map();
     for (let i = 0; i < ids.length; i += 500) {
       const chunk = ids.slice(i, i + 500);
-      for (const row of db.all(
+      for (const row of await db.all(
         `SELECT id, storage_key, created_at FROM material_files WHERE id IN (${chunk.map(() => "?").join(", ")})`,
         chunk,
       ))
@@ -448,34 +449,35 @@ export async function runZipJob(ctx, jobId) {
       entry.date = file.created_at;
       totalBytes += info.size;
     }
-    db.run("UPDATE zip_jobs SET total_bytes = ? WHERE id = ?", [totalBytes, jobId]);
+    await db.run("UPDATE zip_jobs SET total_bytes = ? WHERE id = ?", [totalBytes, jobId]);
 
     let processed = 0;
     let lastWrite = 0;
-    const flush = () => {
+    const flush = async () => {
       lastWrite = Date.now();
-      db.run("UPDATE zip_jobs SET processed_bytes = ? WHERE id = ?", [processed, jobId]);
+      await db.run("UPDATE zip_jobs SET processed_bytes = ? WHERE id = ?", [processed, jobId]);
     };
     const size = await writeArchive(ctx, entries, tmp, {
       totalBytes,
+      // Called for every chunk written; progress is best-effort.
       onBytes(bytes) {
         processed += bytes;
-        if (Date.now() - lastWrite >= PROGRESS_INTERVAL_MS) flush();
+        if (Date.now() - lastWrite >= PROGRESS_INTERVAL_MS) flush().catch(() => {});
       },
     });
     const stored = await storage.putFile(tmp, { move: true });
     const at = now();
-    db.run(
+    await db.run(
       `UPDATE zip_jobs SET status = 'ready', storage_key = ?, size_bytes = ?, processed_bytes = total_bytes,
          finished_at = ?, expires_at = ?, error = NULL WHERE id = ?`,
-      [stored.key, stored.size ?? size, at, addHours(zipRetentionHours(ctx), at), jobId],
+      [stored.key, stored.size ?? size, at, addHours(await zipRetentionHours(ctx), at), jobId],
     );
     return "ready";
   } catch (err) {
     await rm(tmp, { force: true }).catch(() => {});
     if (!(err instanceof FriendlyError)) ctx.log?.error?.(`[zips] ${jobId} failed:`, err);
     const message = err instanceof FriendlyError ? err.message : "Não foi possível gerar o ZIP. Tente de novo em instantes.";
-    db.run("UPDATE zip_jobs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?", [message, now(), jobId]);
+    await db.run("UPDATE zip_jobs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?", [message, now(), jobId]);
     return "failed";
   }
 }
@@ -483,20 +485,20 @@ export async function runZipJob(ctx, jobId) {
 // ------------------------------------------------------------ maintenance
 
 // Jobs interrupted by a restart never finish (the queue lives in memory).
-export function failInterruptedZips(ctx) {
-  return ctx.db.run(
+export async function failInterruptedZips(ctx) {
+  return (await ctx.db.run(
     `UPDATE zip_jobs SET status = 'failed', finished_at = ?,
        error = 'A geração foi interrompida porque o servidor reiniciou. Tente de novo.'
      WHERE status IN (${ACTIVE.map(() => "?").join(", ")})`,
     [now(), ...ACTIVE],
-  ).changes;
+  )).changes;
 }
 
 // Ready ZIPs past ZIP retention become 'expired' and their files are deleted.
 export async function expireZips(ctx) {
-  const rows = ctx.db.all("SELECT id, storage_key FROM zip_jobs WHERE status = 'ready' AND expires_at <= ?", [now()]);
+  const rows = await ctx.db.all("SELECT id, storage_key FROM zip_jobs WHERE status = 'ready' AND expires_at <= ?", [now()]);
   for (const row of rows) {
-    ctx.db.run("UPDATE zip_jobs SET status = 'expired', storage_key = NULL WHERE id = ?", [row.id]);
+    await ctx.db.run("UPDATE zip_jobs SET status = 'expired', storage_key = NULL WHERE id = ?", [row.id]);
     try {
       await removeStorageIfUnreferenced(ctx, row.storage_key);
     } catch (err) {

@@ -92,12 +92,12 @@ const userAgent = (req) => String(req?.get?.("user-agent") ?? "").slice(0, 300) 
 
 // Creates a session row and, when req.res exists, sets the cookie.
 // Returns { id, token, expiresAt }.
-export function createSession(ctx, user, req) {
+export async function createSession(ctx, user, req) {
   const token = newToken();
   const id = newId("ses");
   const createdAt = now();
   const expiresAt = addDays(SESSION_DAYS, createdAt);
-  ctx.db.run(
+  await ctx.db.run(
     `INSERT INTO sessions (id, token_hash, user_id, created_at, last_seen_at, expires_at, ip, user_agent)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, sha256(token), user.id, createdAt, createdAt, expiresAt, clientIp(req), userAgent(req)],
@@ -106,16 +106,16 @@ export function createSession(ctx, user, req) {
   return { id, token, expiresAt };
 }
 
-export function revokeSession(db, sessionId) {
-  db.run("UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", [now(), sessionId]);
+export async function revokeSession(db, sessionId) {
+  await db.run("UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", [now(), sessionId]);
 }
 
 // Revokes every active session of a user, optionally keeping one.
-export function revokeUserSessions(db, userId, { exceptId = null } = {}) {
-  return db.run(
-    "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL AND id IS NOT ?",
+export async function revokeUserSessions(db, userId, { exceptId = null } = {}) {
+  return (await db.run(
+    "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL AND NOT (id <=> ?)",
     [now(), userId, exceptId],
-  ).changes;
+  )).changes;
 }
 
 // Strips secrets from a user row and adds capabilities.
@@ -128,12 +128,12 @@ export function toRequestUser(row) {
 
 // Middleware: reads metta_sid, loads req.session and req.user (or null).
 export function loadSession(ctx) {
-  return function sessionMiddleware(req, res, next) {
+  return async function sessionMiddleware(req, res, next) {
     req.user = null;
     req.session = null;
     const token = req.cookies?.[SESSION_COOKIE];
     if (!token || token.length > 200) return next();
-    const session = ctx.db.get(
+    const session = await ctx.db.get(
       "SELECT * FROM sessions WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?",
       [sha256(token), now()],
     );
@@ -141,9 +141,9 @@ export function loadSession(ctx) {
       clearSessionCookie(res, ctx.config);
       return next();
     }
-    const user = ctx.db.get("SELECT * FROM users WHERE id = ?", [session.user_id]);
+    const user = await ctx.db.get("SELECT * FROM users WHERE id = ?", [session.user_id]);
     if (!user || user.status !== "active") {
-      revokeSession(ctx.db, session.id);
+      await revokeSession(ctx.db, session.id);
       clearSessionCookie(res, ctx.config);
       return next();
     }
@@ -151,7 +151,7 @@ export function loadSession(ctx) {
       const seen = now();
       session.last_seen_at = seen;
       session.expires_at = addDays(SESSION_DAYS, seen);
-      ctx.db.run("UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?", [
+      await ctx.db.run("UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?", [
         seen,
         session.expires_at,
         session.id,
@@ -193,15 +193,15 @@ export const requireClient = requireRole("client");
 
 // Issues a one-time token; previous unused tokens of the same purpose stop
 // working. Returns the raw token (only its hash is stored).
-export function issueToken(ctx, userId, purpose, ttlHours, createdBy = null) {
+export async function issueToken(ctx, userId, purpose, ttlHours, createdBy = null) {
   const token = newToken();
   const createdAt = now();
-  ctx.db.tx(() => {
-    ctx.db.run("DELETE FROM auth_tokens WHERE user_id = ? AND purpose = ? AND used_at IS NULL", [
+  await ctx.db.tx(async () => {
+    await ctx.db.run("DELETE FROM auth_tokens WHERE user_id = ? AND purpose = ? AND used_at IS NULL", [
       userId,
       purpose,
     ]);
-    ctx.db.run(
+    await ctx.db.run(
       `INSERT INTO auth_tokens (token_hash, user_id, purpose, created_by, created_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
       [sha256(token), userId, purpose, createdBy, createdAt, addHours(ttlHours, createdAt)],
@@ -213,12 +213,12 @@ export function issueToken(ctx, userId, purpose, ttlHours, createdBy = null) {
 // Looks a token up without consuming it. purpose may be null (any).
 // Returns { token: row, user } or null when unknown, used, expired or the
 // account is disabled.
-export function peekToken(ctx, rawToken, purpose = null) {
+export async function peekToken(ctx, rawToken, purpose = null) {
   if (typeof rawToken !== "string" || rawToken.length < 20 || rawToken.length > 200) return null;
-  const row = ctx.db.get("SELECT * FROM auth_tokens WHERE token_hash = ?", [sha256(rawToken)]);
+  const row = await ctx.db.get("SELECT * FROM auth_tokens WHERE token_hash = ?", [sha256(rawToken)]);
   if (!row || row.used_at || new Date(row.expires_at).getTime() <= Date.now()) return null;
   if (purpose && row.purpose !== purpose) return null;
-  const user = ctx.db.get("SELECT * FROM users WHERE id = ?", [row.user_id]);
+  const user = await ctx.db.get("SELECT * FROM users WHERE id = ?", [row.user_id]);
   if (!user || user.status === "disabled") return null;
   if (row.purpose === "invite" && user.status !== "invited") return null;
   if (row.purpose === "reset" && user.status !== "active") return null;
@@ -226,10 +226,10 @@ export function peekToken(ctx, rawToken, purpose = null) {
 }
 
 // Consumes a token (single use). Throws 410 expired when it cannot be used.
-export function consumeToken(ctx, rawToken, purpose) {
-  const found = peekToken(ctx, rawToken, purpose);
+export async function consumeToken(ctx, rawToken, purpose) {
+  const found = await peekToken(ctx, rawToken, purpose);
   if (!found) throw expired("Este link expirou ou já foi usado. Peça um novo à equipe Metta.");
-  const { changes } = ctx.db.run(
+  const { changes } = await ctx.db.run(
     "UPDATE auth_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL",
     [now(), found.token.token_hash],
   );
@@ -245,29 +245,29 @@ const MAX_FAILURES_PER_IP = 30;
 
 // Throws 429 after 5 failures for the same e-mail + IP within 15 minutes
 // (counted since the last success), or 30 failures from one IP.
-export function assertLoginAllowed(db, email, ip) {
+export async function assertLoginAllowed(db, email, ip) {
   const since = addMinutes(-WINDOW_MINUTES);
-  const lastSuccess = db.get(
-    "SELECT MAX(created_at) AS at FROM login_attempts WHERE email = ? AND ip IS ? AND success = 1 AND created_at > ?",
+  const lastSuccess = (await db.get(
+    "SELECT MAX(created_at) AS at FROM login_attempts WHERE email = ? AND ip <=> ? AND success = 1 AND created_at > ?",
     [email, ip, since],
-  )?.at;
+  ))?.at;
   const from = lastSuccess && lastSuccess > since ? lastSuccess : since;
-  const failures = db.get(
-    "SELECT COUNT(*) AS n FROM login_attempts WHERE email = ? AND ip IS ? AND success = 0 AND created_at > ?",
+  const failures = (await db.get(
+    "SELECT COUNT(*) AS n FROM login_attempts WHERE email = ? AND ip <=> ? AND success = 0 AND created_at > ?",
     [email, ip, from],
-  ).n;
+  )).n;
   if (failures >= MAX_FAILURES) throw rateLimited();
   if (ip) {
-    const byIp = db.get(
+    const byIp = (await db.get(
       "SELECT COUNT(*) AS n FROM login_attempts WHERE ip = ? AND success = 0 AND created_at > ?",
       [ip, since],
-    ).n;
+    )).n;
     if (byIp >= MAX_FAILURES_PER_IP) throw rateLimited();
   }
 }
 
-export function recordLoginAttempt(db, email, ip, success) {
-  db.run("INSERT INTO login_attempts (email, ip, success, created_at) VALUES (?, ?, ?, ?)", [
+export async function recordLoginAttempt(db, email, ip, success) {
+  await db.run("INSERT INTO login_attempts (email, ip, success, created_at) VALUES (?, ?, ?, ?)", [
     String(email ?? "").slice(0, 254),
     ip,
     success ? 1 : 0,
@@ -275,6 +275,6 @@ export function recordLoginAttempt(db, email, ip, success) {
   ]);
 }
 
-export function pruneLoginAttempts(db, days = 30) {
-  db.run("DELETE FROM login_attempts WHERE created_at < ?", [addDays(-days)]);
+export async function pruneLoginAttempts(db, days = 30) {
+  await db.run("DELETE FROM login_attempts WHERE created_at < ?", [addDays(-days)]);
 }

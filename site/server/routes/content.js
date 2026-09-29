@@ -126,21 +126,21 @@ const campaignPatchSchema = z.object({
 
 const placeholders = (list) => list.map(() => "?").join(", ");
 
-function selectIn(db, sql, ids) {
+async function selectIn(db, sql, ids) {
   const unique = [...new Set(ids.filter(Boolean))];
   const out = [];
   for (let i = 0; i < unique.length; i += 500) {
     const chunk = unique.slice(i, i + 500);
-    out.push(...db.all(sql.replace("(?)", `(${placeholders(chunk)})`), chunk));
+    out.push(...await db.all(sql.replace("(?)", `(${placeholders(chunk)})`), chunk));
   }
   return out;
 }
 
 // Adds slide count, first media kind, duration and frame of the originals of
 // each item's visible version (thumbnail badges on the grid).
-export function decoratePosts(req, items) {
+export async function decoratePosts(req, items) {
   const db = req.ctx.db;
-  const rows = selectIn(
+  const rows = await selectIn(
     db,
     `SELECT version_id, media_kind, duration_ms, width, height, position FROM material_files
       WHERE role = 'original' AND version_id IN (?) ORDER BY position, created_at`,
@@ -165,17 +165,17 @@ export function decoratePosts(req, items) {
   });
 }
 
-function assertPost(req, id, options) {
-  const material = assertMaterial(req, id, options);
+async function assertPost(req, id, options) {
+  const material = await assertMaterial(req, id, options);
   if (material.kind !== "post") throw notFound();
   return material;
 }
 
-function detail(req, id) {
-  const material = getMaterialDetail(req, id);
-  const [decorated] = decoratePosts(req, [material]);
+async function detail(req, id) {
+  const material = await getMaterialDetail(req, id);
+  const [decorated] = await decoratePosts(req, [material]);
   if (isStaff(req) && decorated.post) {
-    const row = req.ctx.db.get(
+    const row = await req.ctx.db.get(
       `SELECT pd.scheduled_by, su.name AS scheduled_by_name, pd.published_by, pu.name AS published_by_name
          FROM post_details pd
          LEFT JOIN users su ON su.id = pd.scheduled_by
@@ -189,9 +189,9 @@ function detail(req, id) {
   return decorated;
 }
 
-function checkCampaign(db, campaignId, brandId) {
+async function checkCampaign(db, campaignId, brandId) {
   if (!campaignId) return;
-  const campaign = db.get("SELECT brand_id FROM campaigns WHERE id = ?", [campaignId]);
+  const campaign = await db.get("SELECT brand_id FROM campaigns WHERE id = ?", [campaignId]);
   if (!campaign || campaign.brand_id !== brandId) throw validation({ campaignId: "Campanha não encontrada nesta marca." });
 }
 
@@ -199,9 +199,9 @@ function checkCampaign(db, campaignId, brandId) {
 // must be someone who already works on this client: an admin, a manager with
 // access to the client or a designer on a project of the brand. Same rule as
 // the library (services/materials.js assertAssignableOwner) -> 422 otherwise.
-function checkOwner(req, ownerId, target) {
+async function checkOwner(req, ownerId, target) {
   if (!ownerId) return;
-  assertAssignableOwner(req, target, ownerId);
+  await assertAssignableOwner(req, target, ownerId);
 }
 
 // Planned date and time are São Paulo wall-clock values (the agency's and its
@@ -233,10 +233,10 @@ function serializeCampaign(req, row) {
   return campaign;
 }
 
-function loadCampaign(req, id) {
-  const row = id ? req.ctx.db.get("SELECT * FROM campaigns WHERE id = ?", [id]) : null;
+async function loadCampaign(req, id) {
+  const row = id ? await req.ctx.db.get("SELECT * FROM campaigns WHERE id = ?", [id]) : null;
   if (!row) throw notFound();
-  assertBrand(req, row.brand_id);
+  await assertBrand(req, row.brand_id);
   return row;
 }
 
@@ -253,7 +253,7 @@ export default function contentRoutes() {
 
   // Filter options for the content screens (brands, projects, campaigns,
   // owners and months with posts), always inside the viewer's scope.
-  router.get("/api/content/options", ...viewers, (req, res) => {
+  router.get("/api/content/options", ...viewers, async (req, res) => {
     const db = req.ctx.db;
     const staff = isStaff(req);
     const brandId = typeof req.query.brandId === "string" && req.query.brandId ? req.query.brandId : null;
@@ -266,7 +266,7 @@ export default function contentRoutes() {
       monthSql += " AND m.brand_id = ?";
       monthParams.push(brandId);
     }
-    const months = db.all(`${monthSql} ORDER BY month DESC`, monthParams).map((row) => row.month);
+    const months = (await db.all(`${monthSql} ORDER BY month DESC`, monthParams)).map((row) => row.month);
 
     if (!staff) {
       const params = [req.user.client_id];
@@ -278,38 +278,38 @@ export default function contentRoutes() {
         sql += " AND cmp.brand_id = ?";
         params.push(brandId);
       }
-      const campaigns = db
-        .all(`${sql} ORDER BY cmp.name COLLATE NOCASE`, params)
+      const campaigns = (await db
+        .all(`${sql} ORDER BY cmp.name COLLATE utf8mb4_0900_ai_ci`, params))
         .filter((row) => Number(row.post_count) > 0)
         .map((row) => serializeCampaign(req, row));
       return res.json({ campaigns, months });
     }
 
     const brandScope = scopeSql.brands(req, "b");
-    const brands = db
+    const brands = (await db
       .all(
         `SELECT b.id, b.name, b.slug, b.client_id, c.name AS client_name FROM brands b JOIN clients c ON c.id = b.client_id
           WHERE b.status = 'active' AND c.status != 'archived' AND ${brandScope.sql}
-          ORDER BY c.name COLLATE NOCASE, b.name COLLATE NOCASE`,
+          ORDER BY c.name COLLATE utf8mb4_0900_ai_ci, b.name COLLATE utf8mb4_0900_ai_ci`,
         brandScope.params,
-      )
+      ))
       .map((row) => ({ id: row.id, name: row.name, slug: row.slug, clientId: row.client_id, clientName: row.client_name }));
     const projectScope = scopeSql.projects(req, "p");
-    const projects = db
+    const projects = (await db
       .all(
         `SELECT p.id, p.name, p.brand_id, p.status FROM projects p
-          WHERE p.status != 'archived' AND ${projectScope.sql} ORDER BY p.name COLLATE NOCASE`,
+          WHERE p.status != 'archived' AND ${projectScope.sql} ORDER BY p.name COLLATE utf8mb4_0900_ai_ci`,
         projectScope.params,
-      )
+      ))
       .map((row) => ({ id: row.id, name: row.name, brandId: row.brand_id, status: row.status }));
-    const campaigns = db
+    const campaigns = (await db
       .all(
         `SELECT cmp.*, (SELECT COUNT(*) FROM post_details pd JOIN materials m ON m.id = pd.material_id
              WHERE pd.campaign_id = cmp.id AND m.archived_at IS NULL) AS post_count
            FROM campaigns cmp JOIN brands b ON b.id = cmp.brand_id
-          WHERE ${brandScope.sql} ORDER BY cmp.name COLLATE NOCASE`,
+          WHERE ${brandScope.sql} ORDER BY cmp.name COLLATE utf8mb4_0900_ai_ci`,
         brandScope.params,
-      )
+      ))
       .map((row) => serializeCampaign(req, row));
     // Owners, each with the brands (in the viewer's scope) they may be made
     // responsible for — see checkOwner; null = every brand (admins).
@@ -320,20 +320,20 @@ export default function contentRoutes() {
       if (!brandsOf.has(userId)) brandsOf.set(userId, new Set());
       brandsOf.get(userId).add(brandId);
     };
-    for (const row of db.all(
+    for (const row of await db.all(
       `SELECT sca.user_id, b.id AS brand_id FROM staff_client_access sca JOIN brands b ON b.client_id = sca.client_id
         JOIN users u ON u.id = sca.user_id WHERE u.role = 'manager'`,
     ))
       addBrand(row.user_id, row.brand_id);
-    for (const row of db.all(
+    for (const row of await db.all(
       `SELECT pm.user_id, p.brand_id FROM project_members pm JOIN projects p ON p.id = pm.project_id
         JOIN users u ON u.id = pm.user_id WHERE u.role = 'designer'`,
     ))
       addBrand(row.user_id, row.brand_id);
-    const owners = db
+    const owners = (await db
       .all(
-        "SELECT id, name, role FROM users WHERE role IN ('admin', 'manager', 'designer') AND status = 'active' ORDER BY name COLLATE NOCASE",
-      )
+        "SELECT id, name, role FROM users WHERE role IN ('admin', 'manager', 'designer') AND status = 'active' ORDER BY name COLLATE utf8mb4_0900_ai_ci",
+      ))
       .map((row) => ({
         id: row.id,
         name: row.name,
@@ -344,7 +344,7 @@ export default function contentRoutes() {
   });
 
   // GET /api/content — posts in scope. Clients only see released posts.
-  router.get("/api/content", ...viewers, (req, res) => {
+  router.get("/api/content", ...viewers, async (req, res) => {
     const q = req.query;
     const staff = isStaff(req);
     const str = (value) => (typeof value === "string" && value.trim() ? value.trim() : undefined);
@@ -374,7 +374,7 @@ export default function contentRoutes() {
     };
     // Calendar: one request returns the dated posts in range plus the undated ones.
     if (!calendar) Object.assign(filters, { from, to });
-    let { items } = listMaterials(req, filters);
+    let { items } = await listMaterials(req, filters);
     // Delivery is its own axis (materials.delivered_at: final files made
     // available), separate from approval and publication.
     const delivered = ["1", "true"].includes(q.delivered) ? true : ["0", "false"].includes(q.delivered) ? false : null;
@@ -401,27 +401,27 @@ export default function contentRoutes() {
       const page = Math.max(1, Number.parseInt(q.page, 10) || 1);
       items = items.slice((page - 1) * size, page * size);
     }
-    const body = { items: decoratePosts(req, items), total };
-    if (undated) body.undated = decoratePosts(req, undated);
+    const body = { items: await decoratePosts(req, items), total };
+    if (undated) body.undated = await decoratePosts(req, undated);
     res.json(body);
   });
 
-  router.post("/api/content", requireAuth, requireCap("content.manage"), (req, res) => {
+  router.post("/api/content", requireAuth, requireCap("content.manage"), async (req, res) => {
     const input = parse(createSchema, req.body);
     const db = req.ctx.db;
     let categoryId = input.categoryId;
     if (!categoryId) {
-      categoryId = db.get("SELECT id FROM categories WHERE slug = ? AND archived_at IS NULL", [DEFAULT_CATEGORY[input.format]])?.id;
+      categoryId = (await db.get("SELECT id FROM categories WHERE slug = ? AND archived_at IS NULL", [DEFAULT_CATEGORY[input.format]]))?.id;
       if (!categoryId) throw validation({ categoryId: "Escolha uma categoria ativa." });
     } else {
-      const category = db.get("SELECT area, archived_at FROM categories WHERE id = ?", [categoryId]);
+      const category = await db.get("SELECT area, archived_at FROM categories WHERE id = ?", [categoryId]);
       if (!category || category.archived_at) throw validation({ categoryId: "Escolha uma categoria ativa." });
     }
     if (input.ownerId) {
-      const brand = assertBrand(req, input.brandId);
-      checkOwner(req, input.ownerId, { clientId: brand.client_id, brandId: brand.id });
+      const brand = await assertBrand(req, input.brandId);
+      await checkOwner(req, input.ownerId, { clientId: brand.client_id, brandId: brand.id });
     }
-    const id = createMaterial(req, {
+    const id = await createMaterial(req, {
       kind: "post",
       brandId: input.brandId,
       projectId: input.projectId ?? null,
@@ -446,20 +446,20 @@ export default function contentRoutes() {
         position: file.position ?? (file.role === "cover" ? 1 : index + 1),
       })),
     });
-    res.status(201).json({ material: detail(req, id) });
+    res.status(201).json({ material: await detail(req, id) });
   });
 
-  router.post("/api/content/bulk-publication", requireAuth, requireCap("content.publication"), (req, res) => {
+  router.post("/api/content/bulk-publication", requireAuth, requireCap("content.publication"), async (req, res) => {
     const { ids, status } = parse(bulkPublicationSchema, req.body);
     const db = req.ctx.db;
     const at = now();
     const updated = [];
     const skipped = [];
-    db.tx(() => {
+    await db.tx(async () => {
       for (const id of [...new Set(ids)]) {
         let material;
         try {
-          material = assertPost(req, id, { write: true });
+          material = await assertPost(req, id, { write: true });
         } catch {
           skipped.push({ id, reason: "Não encontrado." });
           continue;
@@ -468,7 +468,7 @@ export default function contentRoutes() {
           skipped.push({ id, reason: "Material arquivado." });
           continue;
         }
-        const post = db.get("SELECT * FROM post_details WHERE material_id = ?", [id]);
+        const post = await db.get("SELECT * FROM post_details WHERE material_id = ?", [id]);
         if (status === "scheduled") {
           if (material.visibility !== "released") {
             skipped.push({ id, reason: "Ainda não foi liberado ao cliente." });
@@ -479,20 +479,20 @@ export default function contentRoutes() {
             continue;
           }
           const scheduledAt = post.planned_date ? plannedInstant(post.planned_date, post.planned_time) : at;
-          db.run(
+          await db.run(
             `UPDATE post_details SET publication_status = 'scheduled', scheduled_at = ?, scheduled_by = ?,
                published_at = NULL, published_by = NULL, published_url = NULL WHERE material_id = ?`,
             [scheduledAt, req.user.id, id],
           );
         } else {
-          db.run(
+          await db.run(
             `UPDATE post_details SET publication_status = 'not_scheduled', scheduled_at = NULL, scheduled_by = NULL,
                published_at = NULL, published_by = NULL, published_url = NULL WHERE material_id = ?`,
             [id],
           );
         }
-        db.run("UPDATE materials SET updated_at = ? WHERE id = ?", [at, id]);
-        logActivity(req, {
+        await db.run("UPDATE materials SET updated_at = ? WHERE id = ?", [at, id]);
+        await logActivity(req, {
           action: status === "scheduled" ? "content.scheduled" : "content.unscheduled",
           entityType: "material",
           entityId: id,
@@ -510,24 +510,24 @@ export default function contentRoutes() {
     res.json({ updated: updated.length, ids: updated, skipped });
   });
 
-  router.get("/api/content/:id", ...viewers, (req, res) => {
-    assertPost(req, req.params.id);
-    res.json({ material: detail(req, req.params.id) });
+  router.get("/api/content/:id", ...viewers, async (req, res) => {
+    await assertPost(req, req.params.id);
+    res.json({ material: await detail(req, req.params.id) });
   });
 
-  router.patch("/api/content/:id", requireAuth, requireCap("content.manage"), (req, res) => {
+  router.patch("/api/content/:id", requireAuth, requireCap("content.manage"), async (req, res) => {
     const input = parse(patchSchema, req.body);
     const db = req.ctx.db;
-    const material = assertPost(req, req.params.id, { write: true });
+    const material = await assertPost(req, req.params.id, { write: true });
     if (material.archived_at) throw conflict("Material arquivado. Desarquive para editar.");
-    const post = db.get("SELECT * FROM post_details WHERE material_id = ?", [material.id]);
-    if ("campaignId" in input) checkCampaign(db, input.campaignId, material.brand_id);
+    const post = await db.get("SELECT * FROM post_details WHERE material_id = ?", [material.id]);
+    if ("campaignId" in input) await checkCampaign(db, input.campaignId, material.brand_id);
     if ("ownerId" in input && input.ownerId !== material.owner_id)
-      checkOwner(req, input.ownerId, material);
+      await checkOwner(req, input.ownerId, material);
 
     const versionFields = ["caption", "hashtags", "notes"].filter((key) => key in input);
     const version = material.current_version_id
-      ? db.get("SELECT * FROM material_versions WHERE id = ?", [material.current_version_id])
+      ? await db.get("SELECT * FROM material_versions WHERE id = ?", [material.current_version_id])
       : null;
     if (versionFields.length) {
       const editable = version && (version.status === "draft" || version.status === "internal_review");
@@ -540,7 +540,7 @@ export default function contentRoutes() {
 
     const at = now();
     const changed = [];
-    db.tx(() => {
+    await db.tx(async () => {
       const postSet = [];
       const postParams = [];
       const setPost = (column, key) => {
@@ -555,7 +555,7 @@ export default function contentRoutes() {
       setPost("planned_date", "plannedDate");
       setPost("planned_time", "plannedTime");
       setPost("campaign_id", "campaignId");
-      if (postSet.length) db.run(`UPDATE post_details SET ${postSet.join(", ")} WHERE material_id = ?`, [...postParams, material.id]);
+      if (postSet.length) await db.run(`UPDATE post_details SET ${postSet.join(", ")} WHERE material_id = ?`, [...postParams, material.id]);
 
       const matSet = [];
       const matParams = [];
@@ -573,9 +573,9 @@ export default function contentRoutes() {
       // Moving between formats follows the default category when the post
       // still sits in the default category of its old format.
       if (input.format && input.format !== post.format) {
-        const current = db.get("SELECT slug FROM categories WHERE id = ?", [material.category_id])?.slug;
+        const current = (await db.get("SELECT slug FROM categories WHERE id = ?", [material.category_id]))?.slug;
         if (current === DEFAULT_CATEGORY[post.format] && DEFAULT_CATEGORY[input.format] !== current) {
-          const next = db.get("SELECT id FROM categories WHERE slug = ? AND archived_at IS NULL", [DEFAULT_CATEGORY[input.format]]);
+          const next = await db.get("SELECT id FROM categories WHERE slug = ? AND archived_at IS NULL", [DEFAULT_CATEGORY[input.format]]);
           if (next) {
             matSet.push("category_id = ?");
             matParams.push(next.id);
@@ -584,7 +584,7 @@ export default function contentRoutes() {
       }
       matSet.push("updated_at = ?");
       matParams.push(at);
-      db.run(`UPDATE materials SET ${matSet.join(", ")} WHERE id = ?`, [...matParams, material.id]);
+      await db.run(`UPDATE materials SET ${matSet.join(", ")} WHERE id = ?`, [...matParams, material.id]);
 
       const verSet = [];
       const verParams = [];
@@ -594,10 +594,10 @@ export default function contentRoutes() {
         verParams.push(input[key] ?? null);
         changed.push(key);
       }
-      if (verSet.length) db.run(`UPDATE material_versions SET ${verSet.join(", ")} WHERE id = ?`, [...verParams, version.id]);
+      if (verSet.length) await db.run(`UPDATE material_versions SET ${verSet.join(", ")} WHERE id = ?`, [...verParams, version.id]);
 
       if (changed.length)
-        logActivity(req, {
+        await logActivity(req, {
           action: "content.updated",
           entityType: "material",
           entityId: material.id,
@@ -606,13 +606,13 @@ export default function contentRoutes() {
           data: { fields: changed },
         });
     });
-    res.json({ material: detail(req, material.id) });
+    res.json({ material: await detail(req, material.id) });
   });
 
-  router.patch("/api/content/:id/publication", requireAuth, requireCap("content.publication"), (req, res) => {
+  router.patch("/api/content/:id/publication", requireAuth, requireCap("content.publication"), async (req, res) => {
     const input = parse(publicationSchema, req.body);
     const db = req.ctx.db;
-    const material = assertPost(req, req.params.id, { write: true });
+    const material = await assertPost(req, req.params.id, { write: true });
     if (material.archived_at) throw conflict("Material arquivado. Desarquive para alterar a publicação.");
     if (input.status !== "not_scheduled" && material.visibility !== "released")
       throw conflict("Libere o post ao cliente antes de marcar agendamento ou publicação.");
@@ -621,13 +621,13 @@ export default function contentRoutes() {
     if (input.publishedAt && Date.parse(input.publishedAt) > Date.now() + 5 * 60 * 1000)
       throw validation({ publishedAt: "A data de publicação não pode estar no futuro." });
 
-    const post = db.get("SELECT * FROM post_details WHERE material_id = ?", [material.id]);
+    const post = await db.get("SELECT * FROM post_details WHERE material_id = ?", [material.id]);
     const at = now();
     const user = req.user;
     let summary;
-    db.tx(() => {
+    await db.tx(async () => {
       if (input.status === "not_scheduled") {
-        db.run(
+        await db.run(
           `UPDATE post_details SET publication_status = 'not_scheduled', scheduled_at = NULL, scheduled_by = NULL,
              published_at = NULL, published_by = NULL, published_url = NULL WHERE material_id = ?`,
           [material.id],
@@ -635,22 +635,22 @@ export default function contentRoutes() {
         summary = `${user.name} voltou “${material.title}” para não agendado.`;
       } else if (input.status === "scheduled") {
         const scheduledAt = input.scheduledAt ?? (post.planned_date ? plannedInstant(post.planned_date, post.planned_time) : at);
-        db.run(
+        await db.run(
           `UPDATE post_details SET publication_status = 'scheduled', scheduled_at = ?, scheduled_by = ?,
              published_at = NULL, published_by = NULL, published_url = NULL WHERE material_id = ?`,
           [scheduledAt, user.id, material.id],
         );
         summary = `${user.name} marcou “${material.title}” como agendado${plannedLabel(post.planned_date, post.planned_time)}.`;
       } else {
-        db.run(
+        await db.run(
           `UPDATE post_details SET publication_status = 'published', published_at = ?, published_by = ?, published_url = ?
             WHERE material_id = ?`,
           [input.publishedAt ?? at, user.id, input.publishedUrl ?? null, material.id],
         );
         summary = `${user.name} marcou “${material.title}” como publicado manualmente.`;
       }
-      db.run("UPDATE materials SET updated_at = ? WHERE id = ?", [at, material.id]);
-      logActivity(req, {
+      await db.run("UPDATE materials SET updated_at = ? WHERE id = ?", [at, material.id]);
+      await logActivity(req, {
         action: `content.${input.status === "not_scheduled" ? "unscheduled" : input.status}`,
         entityType: "material",
         entityId: material.id,
@@ -667,7 +667,7 @@ export default function contentRoutes() {
         },
       });
       if (input.status === "published" && material.visibility === "released")
-        notify(req, clientUserIds(db, material.client_id), {
+        await notify(req, await clientUserIds(db, material.client_id), {
           type: "content.published",
           title: `“${material.title}” foi publicado`,
           body: "A equipe Metta registrou a publicação deste post.",
@@ -676,12 +676,12 @@ export default function contentRoutes() {
           entityId: material.id,
         });
     });
-    res.json({ material: detail(req, material.id) });
+    res.json({ material: await detail(req, material.id) });
   });
 
   // ---------------------------------------------------------------- campaigns
 
-  router.get("/api/campaigns", ...viewers, (req, res) => {
+  router.get("/api/campaigns", ...viewers, async (req, res) => {
     const db = req.ctx.db;
     const brandId = typeof req.query.brandId === "string" && req.query.brandId ? req.query.brandId : null;
     if (!isStaff(req)) {
@@ -693,8 +693,8 @@ export default function contentRoutes() {
         sql += " AND cmp.brand_id = ?";
         params.push(brandId);
       }
-      const items = db
-        .all(`${sql} ORDER BY cmp.start_date IS NULL, cmp.start_date DESC, cmp.name COLLATE NOCASE`, params)
+      const items = (await db
+        .all(`${sql} ORDER BY cmp.start_date IS NULL, cmp.start_date DESC, cmp.name COLLATE utf8mb4_0900_ai_ci`, params))
         .filter((row) => Number(row.post_count) > 0)
         .map((row) => serializeCampaign(req, row));
       return res.json({ items, total: items.length });
@@ -712,32 +712,32 @@ export default function contentRoutes() {
       sql += " AND cmp.project_id = ?";
       params.push(req.query.projectId);
     }
-    const items = db
-      .all(`${sql} ORDER BY cmp.start_date IS NULL, cmp.start_date DESC, cmp.name COLLATE NOCASE`, params)
+    const items = (await db
+      .all(`${sql} ORDER BY cmp.start_date IS NULL, cmp.start_date DESC, cmp.name COLLATE utf8mb4_0900_ai_ci`, params))
       .map((row) => serializeCampaign(req, row));
     res.json({ items, total: items.length });
   });
 
-  router.post("/api/campaigns", requireAuth, requireCap("content.manage"), (req, res) => {
+  router.post("/api/campaigns", requireAuth, requireCap("content.manage"), async (req, res) => {
     const input = parse(campaignSchema, req.body);
     const db = req.ctx.db;
-    const brand = assertBrand(req, input.brandId);
+    const brand = await assertBrand(req, input.brandId);
     if (input.projectId) {
-      const project = assertProject(req, input.projectId);
+      const project = await assertProject(req, input.projectId);
       if (project.brand_id !== brand.id) throw validation({ projectId: "O projeto precisa ser da mesma marca." });
     }
     checkRange(input.startDate, input.endDate);
-    const duplicate = db.get("SELECT id FROM campaigns WHERE brand_id = ? AND name = ? COLLATE NOCASE", [brand.id, input.name]);
+    const duplicate = await db.get("SELECT id FROM campaigns WHERE brand_id = ? AND name = ? COLLATE utf8mb4_0900_as_ci", [brand.id, input.name]);
     if (duplicate) throw validation({ name: "Já existe uma campanha com este nome nesta marca." });
     const id = newId("cmp");
     const at = now();
-    db.tx(() => {
-      db.run(
+    await db.tx(async () => {
+      await db.run(
         `INSERT INTO campaigns (id, brand_id, project_id, name, description, start_date, end_date, created_by, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, brand.id, input.projectId ?? null, input.name, input.description ?? null, input.startDate ?? null, input.endDate ?? null, req.user.id, at, at],
       );
-      logActivity(req, {
+      await logActivity(req, {
         action: "campaign.created",
         entityType: "campaign",
         entityId: id,
@@ -747,22 +747,22 @@ export default function contentRoutes() {
         summary: `${req.user.name} criou a campanha “${input.name}”.`,
       });
     });
-    res.status(201).json({ campaign: serializeCampaign(req, db.get("SELECT *, 0 AS post_count FROM campaigns WHERE id = ?", [id])) });
+    res.status(201).json({ campaign: serializeCampaign(req, await db.get("SELECT *, 0 AS post_count FROM campaigns WHERE id = ?", [id])) });
   });
 
-  router.patch("/api/campaigns/:id", requireAuth, requireCap("content.manage"), (req, res) => {
+  router.patch("/api/campaigns/:id", requireAuth, requireCap("content.manage"), async (req, res) => {
     const input = parse(campaignPatchSchema, req.body);
     const db = req.ctx.db;
-    const campaign = loadCampaign(req, req.params.id);
+    const campaign = await loadCampaign(req, req.params.id);
     if (input.projectId) {
-      const project = assertProject(req, input.projectId);
+      const project = await assertProject(req, input.projectId);
       if (project.brand_id !== campaign.brand_id) throw validation({ projectId: "O projeto precisa ser da mesma marca." });
     }
     const startDate = "startDate" in input ? input.startDate : campaign.start_date;
     const endDate = "endDate" in input ? input.endDate : campaign.end_date;
     checkRange(startDate, endDate);
     if (input.name && input.name.toLowerCase() !== campaign.name.toLowerCase()) {
-      const duplicate = db.get("SELECT id FROM campaigns WHERE brand_id = ? AND name = ? COLLATE NOCASE AND id != ?", [
+      const duplicate = await db.get("SELECT id FROM campaigns WHERE brand_id = ? AND name = ? COLLATE utf8mb4_0900_as_ci AND id != ?", [
         campaign.brand_id,
         input.name,
         campaign.id,
@@ -779,9 +779,9 @@ export default function contentRoutes() {
     }
     set.push("updated_at = ?");
     params.push(now());
-    db.tx(() => {
-      db.run(`UPDATE campaigns SET ${set.join(", ")} WHERE id = ?`, [...params, campaign.id]);
-      logActivity(req, {
+    await db.tx(async () => {
+      await db.run(`UPDATE campaigns SET ${set.join(", ")} WHERE id = ?`, [...params, campaign.id]);
+      await logActivity(req, {
         action: "campaign.updated",
         entityType: "campaign",
         entityId: campaign.id,
@@ -789,7 +789,7 @@ export default function contentRoutes() {
         summary: `${req.user.name} atualizou a campanha “${input.name ?? campaign.name}”.`,
       });
     });
-    const row = db.get(
+    const row = await db.get(
       `SELECT cmp.*, (SELECT COUNT(*) FROM post_details pd JOIN materials m ON m.id = pd.material_id
           WHERE pd.campaign_id = cmp.id AND m.archived_at IS NULL) AS post_count FROM campaigns cmp WHERE cmp.id = ?`,
       [campaign.id],
@@ -797,14 +797,14 @@ export default function contentRoutes() {
     res.json({ campaign: serializeCampaign(req, row) });
   });
 
-  router.delete("/api/campaigns/:id", requireAuth, requireCap("content.manage"), (req, res) => {
+  router.delete("/api/campaigns/:id", requireAuth, requireCap("content.manage"), async (req, res) => {
     const db = req.ctx.db;
-    const campaign = loadCampaign(req, req.params.id);
+    const campaign = await loadCampaign(req, req.params.id);
     if (req.user.role === "designer" && campaign.created_by !== req.user.id && !can(req.user, "content.publication"))
       throw forbidden("Só quem criou a campanha ou a gestão pode removê-la.");
-    db.tx(() => {
-      db.run("DELETE FROM campaigns WHERE id = ?", [campaign.id]);
-      logActivity(req, {
+    await db.tx(async () => {
+      await db.run("DELETE FROM campaigns WHERE id = ?", [campaign.id]);
+      await logActivity(req, {
         action: "campaign.deleted",
         entityType: "campaign",
         entityId: campaign.id,

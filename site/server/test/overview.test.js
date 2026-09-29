@@ -29,19 +29,19 @@ const inDays = (n) => addDaysToDate(today, n);
 // A timestamp at local noon of today + n days (safe from day-boundary flakiness).
 const noonIn = (n) => iso(Date.parse(localDayStartIso(inDays(n))) + 12 * HOUR);
 
-function run(sql, params) {
-  return ctx.db.run(sql, params);
+async function run(sql, params) {
+  return await ctx.db.run(sql, params);
 }
 
-function setMaterial(id, fields) {
+async function setMaterial(id, fields) {
   const keys = Object.keys(fields);
-  run(`UPDATE materials SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`, [...keys.map((k) => fields[k]), id]);
+  await run(`UPDATE materials SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`, [...keys.map((k) => fields[k]), id]);
 }
 
 // Extra released version for a material (number n, released at `at`).
-function addVersion(materialId, number, at, userId, status = "released") {
+async function addVersion(materialId, number, at, userId, status = "released") {
   const id = newId("ver");
-  run(
+  await run(
     `INSERT INTO material_versions (id, material_id, number, status, created_by, created_at, released_at, released_by)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, materialId, number, status, userId, at, at, userId],
@@ -49,24 +49,24 @@ function addVersion(materialId, number, at, userId, status = "released") {
   return id;
 }
 
-function decide(materialId, versionId, decision, at, userId) {
-  run(
+async function decide(materialId, versionId, decision, at, userId) {
+  await run(
     "INSERT INTO approvals (id, material_id, version_id, decision, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     [newId("apr"), materialId, versionId, decision, userId, at],
   );
 }
 
-function activity({ actor, action, entityType = "material", entityId = null, clientId = null, brandId = null, projectId = null, materialId = null, summary, visibility = "internal", data = null, at = now() }) {
-  run(
+async function activity({ actor, action, entityType = "material", entityId = null, clientId = null, brandId = null, projectId = null, materialId = null, summary, visibility = "internal", data = null, at = now() }) {
+  await run(
     `INSERT INTO activity_log (actor_id, actor_role, action, entity_type, entity_id, client_id, brand_id, project_id, material_id,
        summary, data, visibility, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [actor?.id ?? null, actor?.role ?? null, action, entityType, entityId, clientId, brandId, projectId, materialId, summary, data ? JSON.stringify(data) : null, visibility, at],
   );
 }
 
-function download({ user, clientId, brandId, materialId = null, fileId = null, kind = "file", zipJobId = null, scope, at }) {
+async function download({ user, clientId, brandId, materialId = null, fileId = null, kind = "file", zipJobId = null, scope, at }) {
   const id = newId("dle");
-  run(
+  await run(
     `INSERT INTO download_events (id, user_id, client_id, brand_id, material_id, file_id, zip_job_id, kind, scope, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, user.id, clientId, brandId, materialId, fileId, zipJobId, kind, scope ?? (kind === "zip" ? "selection" : "file"), at],
@@ -75,12 +75,12 @@ function download({ user, clientId, brandId, materialId = null, fileId = null, k
 }
 
 // A ready ZIP job whose entries hold every file of `items` (insertMaterial results).
-function zipJob({ user, clientId, brandId, items, scope, label }) {
+async function zipJob({ user, clientId, brandId, items, scope, label }) {
   const id = newId("zip");
   const entries = items.flatMap((item) =>
     item.files.map((file, index) => ({ f: file.id, m: item.material.id, p: `${label}/${index + 1}-${file.id}.png`, s: 0, n: 10 })),
   );
-  run(
+  await run(
     `INSERT INTO zip_jobs (id, user_id, client_id, brand_id, scope, label, filename, status, file_count, total_bytes, entries, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?)`,
     [id, user.id, clientId, brandId, JSON.stringify(scope), label, `${label}.zip`, entries.length, entries.length * 10, JSON.stringify(entries), now()],
@@ -92,10 +92,10 @@ before(async () => {
   server = await startTestServer();
   ctx = server.ctx;
 
-  const a = createClientWithBrand(ctx, { name: "Cliente Aurora", brandName: "Aurora" });
-  const b = createClientWithBrand(ctx, { name: "Cliente Boreal", brandName: "Boreal" });
+  const a = await createClientWithBrand(ctx, { name: "Cliente Aurora", brandName: "Aurora" });
+  const b = await createClientWithBrand(ctx, { name: "Cliente Boreal", brandName: "Boreal" });
   Object.assign(f, { clientA: a.clientId, brandA: a.brandId, clientB: b.clientId, brandB: b.brandId });
-  f.brandA2 = createBrand(ctx, a.clientId, "Aurora Kids").id;
+  f.brandA2 = (await createBrand(ctx, a.clientId, "Aurora Kids")).id;
 
   u.admin = await createUser(ctx, { role: "admin", name: "Ana Admin" });
   u.managerA = await createUser(ctx, { role: "manager", name: "Gabi Gestora" });
@@ -103,58 +103,58 @@ before(async () => {
   u.finance = await createUser(ctx, { role: "finance", name: "Fábio Financeiro" });
   u.clientA = await createUser(ctx, { role: "client", clientId: a.clientId, name: "Carla Aurora" });
   u.clientB = await createUser(ctx, { role: "client", clientId: b.clientId, name: "Bruno Boreal" });
-  addStaffAccess(ctx, u.managerA.id, a.clientId);
+  await addStaffAccess(ctx, u.managerA.id, a.clientId);
 
-  f.projectA = createProject(ctx, { brandId: a.brandId, name: "Identidade Aurora", memberIds: [u.designer.id] });
-  f.projectA2 = createProject(ctx, { brandId: a.brandId, name: "Site Aurora", status: "planning" });
-  f.projectB = createProject(ctx, { brandId: b.brandId, name: "Campanha Boreal" });
-  run("UPDATE projects SET due_date = ? WHERE id = ?", [inDays(10), f.projectA.id]);
-  run("UPDATE projects SET due_date = ? WHERE id = ?", [inDays(3), f.projectB.id]);
+  f.projectA = await createProject(ctx, { brandId: a.brandId, name: "Identidade Aurora", memberIds: [u.designer.id] });
+  f.projectA2 = await createProject(ctx, { brandId: a.brandId, name: "Site Aurora", status: "planning" });
+  f.projectB = await createProject(ctx, { brandId: b.brandId, name: "Campanha Boreal" });
+  await run("UPDATE projects SET due_date = ? WHERE id = ?", [inDays(10), f.projectA.id]);
+  await run("UPDATE projects SET due_date = ? WHERE id = ?", [inDays(3), f.projectB.id]);
 
   // Client A materials
   f.pendingA = await insertMaterial(ctx, { brandId: a.brandId, projectId: f.projectA.id, title: "Logo principal", visibility: "released", createdBy: u.designer.id });
-  setMaterial(f.pendingA.material.id, { internal_notes: "nota interna secreta" });
+  await setMaterial(f.pendingA.material.id, { internal_notes: "nota interna secreta" });
   f.changesA = await insertMaterial(ctx, { brandId: a.brandId, projectId: f.projectA.id, title: "Carrossel lançamento", kind: "post", plannedDate: inDays(5), visibility: "released", createdBy: u.designer.id });
   f.approvedA = await insertMaterial(ctx, { brandId: a.brandId, projectId: f.projectA.id, title: "Manual da marca", categorySlug: "manual-da-marca", visibility: "released", createdBy: u.designer.id });
   f.draftA = await insertMaterial(ctx, { brandId: a.brandId, projectId: f.projectA.id, title: "Rascunho da papelaria", createdBy: u.designer.id });
-  setMaterial(f.draftA.material.id, { due_date: inDays(5) });
+  await setMaterial(f.draftA.material.id, { due_date: inDays(5) });
   f.reviewA = await insertMaterial(ctx, { brandId: a.brandId, projectId: f.projectA2.id, title: "Ícones do site", visibility: "internal_review", createdBy: u.managerA.id });
-  setMaterial(f.reviewA.material.id, { due_date: inDays(-2) });
+  await setMaterial(f.reviewA.material.id, { due_date: inDays(-2) });
   f.otherBrandA2 = await insertMaterial(ctx, { brandId: f.brandA2, title: "Logo Kids", visibility: "released", createdBy: u.managerA.id });
   // Client B
   f.pendingB = await insertMaterial(ctx, { brandId: b.brandId, projectId: f.projectB.id, title: "Logo Boreal", visibility: "released", createdBy: u.admin.id });
-  setMaterial(f.pendingB.material.id, { due_date: inDays(2) });
+  await setMaterial(f.pendingB.material.id, { due_date: inDays(2) });
 
   // Decision history on A: carrossel v1 changes requested; manual v1 changes, v2 approved (1 round).
   const t0 = Date.now() - 20 * 24 * HOUR;
-  run("UPDATE material_versions SET released_at = ? WHERE id = ?", [iso(t0), f.changesA.version.id]);
-  decide(f.changesA.material.id, f.changesA.version.id, "changes_requested", iso(t0 + 10 * HOUR), u.clientA.id);
-  setMaterial(f.changesA.material.id, { approval_status: "changes_requested" });
+  await run("UPDATE material_versions SET released_at = ? WHERE id = ?", [iso(t0), f.changesA.version.id]);
+  await decide(f.changesA.material.id, f.changesA.version.id, "changes_requested", iso(t0 + 10 * HOUR), u.clientA.id);
+  await setMaterial(f.changesA.material.id, { approval_status: "changes_requested" });
 
-  run("UPDATE material_versions SET released_at = ?, status = 'superseded' WHERE id = ?", [iso(t0), f.approvedA.version.id]);
-  decide(f.approvedA.material.id, f.approvedA.version.id, "changes_requested", iso(t0 + 20 * HOUR), u.clientA.id);
-  const v2 = addVersion(f.approvedA.material.id, 2, iso(t0 + 48 * HOUR), u.designer.id, "approved");
-  decide(f.approvedA.material.id, v2, "approved", iso(t0 + 54 * HOUR), u.clientA.id);
-  setMaterial(f.approvedA.material.id, { approval_status: "approved", approved_version_id: v2, released_version_id: v2, current_version_id: v2 });
+  await run("UPDATE material_versions SET released_at = ?, status = 'superseded' WHERE id = ?", [iso(t0), f.approvedA.version.id]);
+  await decide(f.approvedA.material.id, f.approvedA.version.id, "changes_requested", iso(t0 + 20 * HOUR), u.clientA.id);
+  const v2 = await addVersion(f.approvedA.material.id, 2, iso(t0 + 48 * HOUR), u.designer.id, "approved");
+  await decide(f.approvedA.material.id, v2, "approved", iso(t0 + 54 * HOUR), u.clientA.id);
+  await setMaterial(f.approvedA.material.id, { approval_status: "approved", approved_version_id: v2, released_version_id: v2, current_version_id: v2 });
 
   // Client B decision (must never count for manager A)
-  run("UPDATE material_versions SET released_at = ? WHERE id = ?", [iso(t0), f.pendingB.version.id]);
-  const vB2 = addVersion(f.pendingB.material.id, 2, iso(t0 + 5 * HOUR), u.admin.id);
-  decide(f.pendingB.material.id, vB2, "approved", iso(t0 + 7 * HOUR), u.clientB.id);
-  setMaterial(f.pendingB.material.id, { approval_status: "pending", released_version_id: vB2, current_version_id: vB2 });
+  await run("UPDATE material_versions SET released_at = ? WHERE id = ?", [iso(t0), f.pendingB.version.id]);
+  const vB2 = await addVersion(f.pendingB.material.id, 2, iso(t0 + 5 * HOUR), u.admin.id);
+  await decide(f.pendingB.material.id, vB2, "approved", iso(t0 + 7 * HOUR), u.clientB.id);
+  await setMaterial(f.pendingB.material.id, { approval_status: "pending", released_version_id: vB2, current_version_id: vB2 });
 
   // Briefings: A awaiting, A draft (not counted), B in progress
   const at = now();
-  const briefing = (brandId, status, title, questions = [], answers = {}) => {
+  const briefing = async (brandId, status, title, questions = [], answers = {}) => {
     const id = newId("brf");
-    run(
+    await run(
       `INSERT INTO briefings (id, brand_id, title, questions, answers, status, sent_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, brandId, title, JSON.stringify(questions), JSON.stringify(answers), status, status === "draft" ? null : at, at, at],
     );
     return id;
   };
-  f.briefingA = briefing(
+  f.briefingA = await briefing(
     a.brandId,
     "awaiting_client",
     "Briefing de conteúdo",
@@ -164,52 +164,52 @@ before(async () => {
     ],
     { q1: "Fintechs" },
   );
-  briefing(a.brandId, "draft", "Rascunho de briefing");
-  briefing(b.brandId, "in_progress", "Briefing Boreal");
+  await briefing(a.brandId, "draft", "Rascunho de briefing");
+  await briefing(b.brandId, "in_progress", "Briefing Boreal");
 
   // Commerce: A pending order, B paid + failed, A active subscription.
-  const svc = ctx.db.get("SELECT id FROM services ORDER BY sort_order LIMIT 1").id;
-  const order = (clientId, brandId, status, cents, extra = {}) =>
-    run(
+  const svc = (await ctx.db.get("SELECT id FROM services ORDER BY sort_order LIMIT 1")).id;
+  const order = async (clientId, brandId, status, cents, extra = {}) =>
+    await run(
       `INSERT INTO orders (id, client_id, brand_id, description, amount_cents, status, due_date, external_reference, paid_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [newId("ord"), clientId, brandId, extra.description ?? "Pedido de teste", cents, status, extra.due ?? null, newId("ref"), extra.paidAt ?? null, extra.at ?? at, extra.at ?? at],
     );
-  order(a.clientId, a.brandId, "pending_payment", 150000, { due: inDays(7), description: "Identidade visual" });
-  order(b.clientId, b.brandId, "paid", 90000, { paidAt: noonIn(-3) });
-  order(b.clientId, b.brandId, "failed", 50000, { at: noonIn(-2), description: "=HYPERLINK(\"x\")" });
-  run(
+  await order(a.clientId, a.brandId, "pending_payment", 150000, { due: inDays(7), description: "Identidade visual" });
+  await order(b.clientId, b.brandId, "paid", 90000, { paidAt: noonIn(-3) });
+  await order(b.clientId, b.brandId, "failed", 50000, { at: noonIn(-2), description: "=HYPERLINK(\"x\")" });
+  await run(
     `INSERT INTO subscriptions (id, client_id, service_id, amount_cents, status, external_reference, created_at, updated_at)
      VALUES (?, ?, ?, 120000, 'active', ?, ?, ?)`,
     [newId("sub"), a.clientId, svc, newId("ref"), at, at],
   );
 
   // Tasks: designer has 2 open (1 overdue) and 1 done.
-  const task = (title, status, due) =>
-    run(
+  const task = async (title, status, due) =>
+    await run(
       `INSERT INTO tasks (id, project_id, title, assignee_id, status, due_date, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [newId("tsk"), f.projectA.id, title, u.designer.id, status, due, at, at],
     );
-  task("Ajustar carrossel", "doing", inDays(-1));
-  task("Exportar logos", "todo", inDays(4));
-  task("Tarefa concluída", "done", inDays(1));
+  await task("Ajustar carrossel", "doing", inDays(-1));
+  await task("Exportar logos", "todo", inDays(4));
+  await task("Tarefa concluída", "done", inDays(1));
 
   // Activity: client-visible and internal rows on A, rows on B, an old row.
-  activity({ actor: u.managerA, action: "release.created", entityType: "release", clientId: a.clientId, brandId: a.brandId, materialId: f.pendingA.material.id, projectId: f.projectA.id, summary: "Gabi liberou “Logo principal”.", visibility: "client", data: { items: 1 }, at: noonIn(-1) });
-  activity({ actor: u.designer, action: "material.created", clientId: a.clientId, brandId: a.brandId, materialId: f.draftA.material.id, projectId: f.projectA.id, entityId: f.draftA.material.id, summary: "Davi criou o material “Rascunho da papelaria”.", data: { secret: "interno" }, at: noonIn(0) });
-  activity({ actor: u.clientA, action: "approval.approved", entityType: "approval", clientId: a.clientId, brandId: a.brandId, materialId: f.approvedA.material.id, projectId: f.projectA.id, summary: "Carla aprovou a versão 2 de “Manual da marca”.", visibility: "client", at: noonIn(-15) });
-  activity({ actor: u.admin, action: "client.updated", entityType: "client", entityId: a.clientId, clientId: a.clientId, summary: "Ana atualizou o cadastro de Cliente Aurora.", at: noonIn(-5) });
-  activity({ actor: u.admin, action: "release.created", entityType: "release", clientId: b.clientId, brandId: b.brandId, materialId: f.pendingB.material.id, projectId: f.projectB.id, summary: "Ana liberou “Logo Boreal”.", visibility: "client", at: noonIn(-1) });
-  activity({ actor: u.clientA, action: "order.paid", entityType: "order", clientId: a.clientId, summary: "Pagamento confirmado.", visibility: "client", at: noonIn(-40) });
-  activity({ actor: u.admin, action: "settings.updated", entityType: "settings", summary: "Ana alterou as configurações.", at: noonIn(-2) });
+  await activity({ actor: u.managerA, action: "release.created", entityType: "release", clientId: a.clientId, brandId: a.brandId, materialId: f.pendingA.material.id, projectId: f.projectA.id, summary: "Gabi liberou “Logo principal”.", visibility: "client", data: { items: 1 }, at: noonIn(-1) });
+  await activity({ actor: u.designer, action: "material.created", clientId: a.clientId, brandId: a.brandId, materialId: f.draftA.material.id, projectId: f.projectA.id, entityId: f.draftA.material.id, summary: "Davi criou o material “Rascunho da papelaria”.", data: { secret: "interno" }, at: noonIn(0) });
+  await activity({ actor: u.clientA, action: "approval.approved", entityType: "approval", clientId: a.clientId, brandId: a.brandId, materialId: f.approvedA.material.id, projectId: f.projectA.id, summary: "Carla aprovou a versão 2 de “Manual da marca”.", visibility: "client", at: noonIn(-15) });
+  await activity({ actor: u.admin, action: "client.updated", entityType: "client", entityId: a.clientId, clientId: a.clientId, summary: "Ana atualizou o cadastro de Cliente Aurora.", at: noonIn(-5) });
+  await activity({ actor: u.admin, action: "release.created", entityType: "release", clientId: b.clientId, brandId: b.brandId, materialId: f.pendingB.material.id, projectId: f.projectB.id, summary: "Ana liberou “Logo Boreal”.", visibility: "client", at: noonIn(-1) });
+  await activity({ actor: u.clientA, action: "order.paid", entityType: "order", clientId: a.clientId, summary: "Pagamento confirmado.", visibility: "client", at: noonIn(-40) });
+  await activity({ actor: u.admin, action: "settings.updated", entityType: "settings", summary: "Ana alterou as configurações.", at: noonIn(-2) });
 
   // Downloads: client A twice (file + zip), staff once on A, client B once.
   const fileA = f.pendingA.files[0].id;
-  download({ user: u.clientA, clientId: a.clientId, brandId: a.brandId, materialId: f.pendingA.material.id, fileId: fileA, at: noonIn(-2) });
-  download({ user: u.clientA, clientId: a.clientId, brandId: a.brandId, kind: "zip", at: noonIn(-1) });
-  download({ user: u.managerA, clientId: a.clientId, brandId: a.brandId, materialId: f.pendingA.material.id, fileId: fileA, at: noonIn(-1) });
-  download({ user: u.clientB, clientId: b.clientId, brandId: b.brandId, materialId: f.pendingB.material.id, fileId: f.pendingB.files[0].id, at: noonIn(-1) });
+  await download({ user: u.clientA, clientId: a.clientId, brandId: a.brandId, materialId: f.pendingA.material.id, fileId: fileA, at: noonIn(-2) });
+  await download({ user: u.clientA, clientId: a.clientId, brandId: a.brandId, kind: "zip", at: noonIn(-1) });
+  await download({ user: u.managerA, clientId: a.clientId, brandId: a.brandId, materialId: f.pendingA.material.id, fileId: fileA, at: noonIn(-1) });
+  await download({ user: u.clientB, clientId: b.clientId, brandId: b.brandId, materialId: f.pendingB.material.id, fileId: f.pendingB.files[0].id, at: noonIn(-1) });
 
   for (const [key, user] of Object.entries(u)) agents[key] = await login(server, { email: user.email });
 });
@@ -407,9 +407,9 @@ describe("GET /api/activity", () => {
     assert.equal(lines.length, 3); // header + release + download
     assert.ok(lines.some((line) => /Ana liberou “Logo Boreal”/.test(line)));
     assert.ok(lines.some((line) => /Bruno Boreal baixou .*Download — não equivale a aprovação\./.test(line)));
-    const logged = ctx.db.get("SELECT * FROM activity_log WHERE action = 'activity.exported' ORDER BY id DESC LIMIT 1");
+    const logged = await ctx.db.get("SELECT * FROM activity_log WHERE action = 'activity.exported' ORDER BY id DESC LIMIT 1");
     assert.equal(logged.actor_id, u.admin.id);
-    ctx.db.run("DELETE FROM activity_log WHERE action IN ('activity.exported', 'report.exported')");
+    await ctx.db.run("DELETE FROM activity_log WHERE action IN ('activity.exported', 'report.exported')");
   });
 });
 
@@ -427,13 +427,13 @@ describe("GET /api/portal/activity", () => {
   });
 
   test("links to materials the client can no longer see are dropped", async () => {
-    setMaterial(f.pendingA.material.id, { archived_at: now() });
+    await setMaterial(f.pendingA.material.id, { archived_at: now() });
     const items = (await agents.clientA.get("/api/portal/activity")).body.items;
     const release = items.find((a) => a.action === "release.created");
     assert.equal(release.link, null);
     assert.equal(release.material, null);
     assert.equal(release.materialId, null);
-    setMaterial(f.pendingA.material.id, { archived_at: null });
+    await setMaterial(f.pendingA.material.id, { archived_at: null });
   });
 });
 
@@ -502,7 +502,7 @@ describe("reports", () => {
     assert.equal(scoped.totals.events, 3);
     assert.ok(scoped.byClient.every((c) => c.id === f.clientA));
     // a download never changes approval state
-    assert.equal(ctx.db.get("SELECT approval_status FROM materials WHERE id = ?", [f.pendingA.material.id]).approval_status, "pending");
+    assert.equal((await ctx.db.get("SELECT approval_status FROM materials WHERE id = ?", [f.pendingA.material.id])).approval_status, "pending");
   });
 
   test("finance report requires reports.finance", async () => {
@@ -552,7 +552,7 @@ describe("reports", () => {
     const deliveries = await agents.admin.request("GET", `/api/reports/deliveries?${range()}&format=csv`, { raw: true });
     const rows = Buffer.from(await deliveries.arrayBuffer()).toString("utf8").slice(1).trimEnd().split("\r\n");
     assert.equal(rows.length, 8); // header + 7 releases
-    assert.equal(ctx.db.get("SELECT COUNT(*) AS n FROM activity_log WHERE action = 'report.exported'").n, 2);
+    assert.equal((await ctx.db.get("SELECT COUNT(*) AS n FROM activity_log WHERE action = 'report.exported'")).n, 2);
   });
 
   test("csvCell escapes separators, quotes and formulas", () => {
@@ -577,20 +577,20 @@ describe("reports", () => {
 
 describe("Histórico lists downloads, never as approvals (D1)", () => {
   const x = {};
-  before(() => {
+  before(async () => {
     // Brand kit ZIP with two materials of project A; carousel ZIP with one;
     // a ZIP with only "Logo Kids" (no project: never the designer's).
-    x.kitJob = zipJob({ user: u.clientA, clientId: f.clientA, brandId: f.brandA, items: [f.pendingA, f.changesA], scope: { type: "brand_kit", brandId: f.brandA }, label: "Kit de marca · Aurora" });
-    x.carouselJob = zipJob({ user: u.clientA, clientId: f.clientA, brandId: f.brandA, items: [f.changesA], scope: { type: "carousel", materialId: f.changesA.material.id }, label: "Carrossel · Carrossel lançamento" });
-    x.kidsJob = zipJob({ user: u.clientA, clientId: f.clientA, brandId: f.brandA2, items: [f.otherBrandA2], scope: { type: "selection", fileIds: [], materialIds: [f.otherBrandA2.material.id] }, label: "Seleção · 1 arquivo" });
-    const job = (id) => ctx.db.get("SELECT scope FROM zip_jobs WHERE id = ?", [id]).scope;
-    x.kit = download({ user: u.clientA, clientId: f.clientA, brandId: f.brandA, kind: "zip", zipJobId: x.kitJob, scope: job(x.kitJob), at: noonIn(0) });
-    x.carousel = download({ user: u.clientA, clientId: f.clientA, brandId: f.brandA, kind: "zip", zipJobId: x.carouselJob, scope: job(x.carouselJob), at: noonIn(0) });
-    x.kids = download({ user: u.clientA, clientId: f.clientA, brandId: f.brandA2, kind: "zip", zipJobId: x.kidsJob, scope: job(x.kidsJob), at: noonIn(0) });
+    x.kitJob = await zipJob({ user: u.clientA, clientId: f.clientA, brandId: f.brandA, items: [f.pendingA, f.changesA], scope: { type: "brand_kit", brandId: f.brandA }, label: "Kit de marca · Aurora" });
+    x.carouselJob = await zipJob({ user: u.clientA, clientId: f.clientA, brandId: f.brandA, items: [f.changesA], scope: { type: "carousel", materialId: f.changesA.material.id }, label: "Carrossel · Carrossel lançamento" });
+    x.kidsJob = await zipJob({ user: u.clientA, clientId: f.clientA, brandId: f.brandA2, items: [f.otherBrandA2], scope: { type: "selection", fileIds: [], materialIds: [f.otherBrandA2.material.id] }, label: "Seleção · 1 arquivo" });
+    const job = async (id) => (await ctx.db.get("SELECT scope FROM zip_jobs WHERE id = ?", [id])).scope;
+    x.kit = await download({ user: u.clientA, clientId: f.clientA, brandId: f.brandA, kind: "zip", zipJobId: x.kitJob, scope: await job(x.kitJob), at: noonIn(0) });
+    x.carousel = await download({ user: u.clientA, clientId: f.clientA, brandId: f.brandA, kind: "zip", zipJobId: x.carouselJob, scope: await job(x.carouselJob), at: noonIn(0) });
+    x.kids = await download({ user: u.clientA, clientId: f.clientA, brandId: f.brandA2, kind: "zip", zipJobId: x.kidsJob, scope: await job(x.kidsJob), at: noonIn(0) });
   });
-  after(() => {
-    run("DELETE FROM download_events WHERE id IN (?, ?, ?)", [x.kit, x.carousel, x.kids]);
-    run("DELETE FROM zip_jobs WHERE id IN (?, ?, ?)", [x.kitJob, x.carouselJob, x.kidsJob]);
+  after(async () => {
+    await run("DELETE FROM download_events WHERE id IN (?, ?, ?)", [x.kit, x.carousel, x.kids]);
+    await run("DELETE FROM zip_jobs WHERE id IN (?, ?, ?)", [x.kitJob, x.carouselJob, x.kidsJob]);
   });
 
   test("file and ZIP downloads come with who, what, where and the no-approval note", async () => {
@@ -628,7 +628,7 @@ describe("Histórico lists downloads, never as approvals (D1)", () => {
     // own type, own filter, searchable, and nothing changed the approval state
     assert.equal((await agents.admin.get("/api/activity?entityType=download")).body.total, 7);
     assert.equal((await agents.admin.get("/api/activity?q=Kit%20de%20marca")).body.items[0].id, x.kit);
-    assert.equal(ctx.db.get("SELECT approval_status FROM materials WHERE id = ?", [f.changesA.material.id]).approval_status, "changes_requested");
+    assert.equal((await ctx.db.get("SELECT approval_status FROM materials WHERE id = ?", [f.changesA.material.id])).approval_status, "changes_requested");
   });
 
   test("ZIPs are attributed to the materials and projects they hold", async () => {
@@ -668,21 +668,21 @@ describe("Histórico lists downloads, never as approvals (D1)", () => {
 describe("Entregas próximas: posts by planned date, finished deliverables leave", () => {
   const x = {};
   before(async () => {
-    const c = createClientWithBrand(ctx, { name: "Cliente Cometa", brandName: "Cometa" });
+    const c = await createClientWithBrand(ctx, { name: "Cliente Cometa", brandName: "Cometa" });
     x.client = c.clientId;
     u.managerC = await createUser(ctx, { role: "manager", name: "Cora Gestora" });
-    addStaffAccess(ctx, u.managerC.id, c.clientId);
+    await addStaffAccess(ctx, u.managerC.id, c.clientId);
     agents.managerC = await login(server, { email: u.managerC.email });
     const post = async (title, plannedDate, { visibility = "draft", approval, publication, due } = {}) => {
       const item = await insertMaterial(ctx, { brandId: c.brandId, kind: "post", title, plannedDate, visibility, createdBy: u.managerC.id });
-      if (approval) setMaterial(item.material.id, { approval_status: approval, requires_approval: approval === "none" ? 0 : 1 });
-      if (due) setMaterial(item.material.id, { due_date: due });
-      if (publication) run("UPDATE post_details SET publication_status = ?, planned_time = '14:30' WHERE material_id = ?", [publication, item.material.id]);
+      if (approval) await setMaterial(item.material.id, { approval_status: approval, requires_approval: approval === "none" ? 0 : 1 });
+      if (due) await setMaterial(item.material.id, { due_date: due });
+      if (publication) await run("UPDATE post_details SET publication_status = ?, planned_time = '14:30' WHERE material_id = ?", [publication, item.material.id]);
       return item.material.id;
     };
     const asset = async (title, due, { visibility = "released", approval } = {}) => {
       const item = await insertMaterial(ctx, { brandId: c.brandId, title, visibility, createdBy: u.managerC.id });
-      setMaterial(item.material.id, { due_date: due, ...(approval ? { approval_status: approval, requires_approval: approval === "none" ? 0 : 1 } : {}) });
+      await setMaterial(item.material.id, { due_date: due, ...(approval ? { approval_status: approval, requires_approval: approval === "none" ? 0 : 1 } : {}) });
       return item.material.id;
     };
     x.draftPost = await post("Post em produção", inDays(3));
@@ -695,8 +695,8 @@ describe("Entregas próximas: posts by planned date, finished deliverables leave
     x.noApprovalAsset = await asset("Manual entregue", inDays(-5), { approval: "none" });
     x.pendingAsset = await asset("Papelaria com o cliente", inDays(-4));
   });
-  after(() => {
-    run("DELETE FROM materials WHERE brand_id IN (SELECT id FROM brands WHERE client_id = ?)", [x.client]);
+  after(async () => {
+    await run("DELETE FROM materials WHERE brand_id IN (SELECT id FROM brands WHERE client_id = ?)", [x.client]);
   });
 
   test("posts count by deadline or planned publication date until approved or published", async () => {
@@ -741,13 +741,13 @@ describe("Pagamentos em aberto include payments Mercado Pago rejected", () => {
 
 describe("downloads report: ZIPs count for every material inside", () => {
   const x = {};
-  before(() => {
-    x.job = zipJob({ user: u.clientA, clientId: f.clientA, brandId: f.brandA, items: [f.pendingA, f.approvedA, f.pendingA], scope: { type: "brand_kit", brandId: f.brandA }, label: "Kit de marca · Aurora" });
-    x.event = download({ user: u.clientA, clientId: f.clientA, brandId: f.brandA, kind: "zip", zipJobId: x.job, scope: JSON.stringify({ type: "brand_kit" }), at: noonIn(0) });
+  before(async () => {
+    x.job = await zipJob({ user: u.clientA, clientId: f.clientA, brandId: f.brandA, items: [f.pendingA, f.approvedA, f.pendingA], scope: { type: "brand_kit", brandId: f.brandA }, label: "Kit de marca · Aurora" });
+    x.event = await download({ user: u.clientA, clientId: f.clientA, brandId: f.brandA, kind: "zip", zipJobId: x.job, scope: JSON.stringify({ type: "brand_kit" }), at: noonIn(0) });
   });
-  after(() => {
-    run("DELETE FROM download_events WHERE id = ?", [x.event]);
-    run("DELETE FROM zip_jobs WHERE id = ?", [x.job]);
+  after(async () => {
+    await run("DELETE FROM download_events WHERE id = ?", [x.event]);
+    await run("DELETE FROM zip_jobs WHERE id = ?", [x.job]);
   });
 
   test("byMaterial and totals.materials include ZIP contents", async () => {
@@ -768,6 +768,6 @@ describe("downloads report: ZIPs count for every material inside", () => {
     const csv = await agents.admin.request("GET", `/api/reports/downloads?from=${inDays(-30)}&to=${inDays(0)}&format=csv`, { raw: true });
     const text = Buffer.from(await csv.arrayBuffer()).toString("utf8");
     assert.match(text, /Logo principal, Manual da marca;Kit de marca · Aurora;ZIP/);
-    ctx.db.run("DELETE FROM activity_log WHERE action = 'report.exported'");
+    await ctx.db.run("DELETE FROM activity_log WHERE action = 'report.exported'");
   });
 });

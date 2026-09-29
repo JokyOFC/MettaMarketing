@@ -25,8 +25,8 @@ const f = {};
 before(async () => {
   server = await startTestServer();
   ctx = server.ctx;
-  const one = createClientWithBrand(ctx, { name: "Cliente Um", brandName: "Marca Um" });
-  const two = createClientWithBrand(ctx, { name: "Cliente Dois", brandName: "Marca Dois" });
+  const one = await createClientWithBrand(ctx, { name: "Cliente Um", brandName: "Marca Um" });
+  const two = await createClientWithBrand(ctx, { name: "Cliente Dois", brandName: "Marca Dois" });
   Object.assign(f, { clientA: one.clientId, brandA: one.brandId, clientB: two.clientId, brandB: two.brandId });
 
   u.admin = await createUser(ctx, { role: "admin", name: "Admin Principal" });
@@ -35,8 +35,8 @@ before(async () => {
   u.designer = await createUser(ctx, { role: "designer", name: "Designer A" });
   u.finance = await createUser(ctx, { role: "finance", name: "Financeiro" });
   u.clientA = await createUser(ctx, { role: "client", clientId: f.clientA, name: "Cliente A" });
-  addStaffAccess(ctx, u.manager.id, f.clientA);
-  f.projectA = createProject(ctx, { brandId: f.brandA, memberIds: [u.designer.id] }).id;
+  await addStaffAccess(ctx, u.manager.id, f.clientA);
+  f.projectA = (await createProject(ctx, { brandId: f.brandA, memberIds: [u.designer.id] })).id;
 
   for (const [key, user] of Object.entries(u)) a[key] = await login(server, { email: user.email });
 });
@@ -67,13 +67,13 @@ describe("clients", () => {
     // e-mail is not configured in tests: the link comes back for the team to hand over
     assert.equal(res.body.emailStatus, "not_configured");
     assert.match(res.body.inviteUrl, /\/convite\/[A-Za-z0-9_-]{20,}$/);
-    assert.equal(lastEmail(ctx, "bruno@aurora.test").status, "not_configured");
+    assert.equal((await lastEmail(ctx, "bruno@aurora.test")).status, "not_configured");
 
     // the manager got access and an in-app notice
     const clientId = res.body.client.id;
-    assert.ok(ctx.db.get("SELECT 1 AS y FROM staff_client_access WHERE user_id = ? AND client_id = ?", [u.manager.id, clientId]));
-    assert.ok(ctx.db.get("SELECT 1 AS y FROM notifications WHERE user_id = ? AND entity_id = ?", [u.manager.id, clientId]));
-    const logged = ctx.db.all("SELECT action FROM activity_log WHERE client_id = ?", [clientId]).map((r) => r.action);
+    assert.ok(await ctx.db.get("SELECT 1 AS y FROM staff_client_access WHERE user_id = ? AND client_id = ?", [u.manager.id, clientId]));
+    assert.ok(await ctx.db.get("SELECT 1 AS y FROM notifications WHERE user_id = ? AND entity_id = ?", [u.manager.id, clientId]));
+    const logged = (await ctx.db.all("SELECT action FROM activity_log WHERE client_id = ?", [clientId])).map((r) => r.action);
     for (const action of ["client.created", "brand.created", "user.invited"]) assert.ok(logged.includes(action), action);
 
     // the invitation works end to end
@@ -120,7 +120,7 @@ describe("clients", () => {
   });
 
   test("search never matches fields the role cannot read (designer: no CNPJ or contacts)", async () => {
-    ctx.db.run("UPDATE clients SET document = ?, contact_email = ?, contact_name = ? WHERE id = ?", [
+    await ctx.db.run("UPDATE clients SET document = ?, contact_email = ?, contact_name = ? WHERE id = ?", [
       "44.555.666/0001-77",
       "ceo-secreto@um.test",
       "Contato Sigiloso",
@@ -134,16 +134,16 @@ describe("clients", () => {
     assert.equal(await count(a.designer, "Cliente Um"), 1, "name still matches");
     assert.equal(await count(a.designer, "Marca Um"), 1, "brand of the designer's project matches");
     // brand names outside the designer's projects are not searchable either
-    const hidden = ctx.db.get("SELECT id FROM brands WHERE client_id = ? AND name = 'Marca Oculta'", [f.clientA]);
+    const hidden = await ctx.db.get("SELECT id FROM brands WHERE client_id = ? AND name = 'Marca Oculta'", [f.clientA]);
     if (!hidden)
-      ctx.db.run(
-        "INSERT INTO brands (id, client_id, name, slug, status, created_at, updated_at) VALUES ('brd_searchHidden001', ?, 'Marca Oculta', 'marca-oculta', 'active', datetime('now'), datetime('now'))",
-        [f.clientA],
+      await ctx.db.run(
+        "INSERT INTO brands (id, client_id, name, slug, status, created_at, updated_at) VALUES ('brd_searchHidden001', ?, 'Marca Oculta', 'marca-oculta', 'active', ?, ?)",
+        [f.clientA, new Date().toISOString(), new Date().toISOString()],
       );
     assert.equal(await count(a.designer, "Marca Oculta"), 0);
     assert.equal(await count(a.manager, "Marca Oculta"), 1);
-    ctx.db.run("DELETE FROM brands WHERE id = 'brd_searchHidden001'");
-    ctx.db.run("UPDATE clients SET document = NULL, contact_email = NULL, contact_name = NULL WHERE id = ?", [f.clientA]);
+    await ctx.db.run("DELETE FROM brands WHERE id = 'brd_searchHidden001'");
+    await ctx.db.run("UPDATE clients SET document = NULL, contact_email = NULL, contact_name = NULL WHERE id = ?", [f.clientA]);
   });
 
   test("detail: 404 outside the scope, internal data only for the team", async () => {
@@ -224,7 +224,7 @@ describe("brands", () => {
   });
 
   test("clients see only their own active brands, without internal notes", async () => {
-    ctx.db.run("UPDATE brands SET internal_notes = 'segredo' WHERE id = ?", [f.brandA]);
+    await ctx.db.run("UPDATE brands SET internal_notes = 'segredo' WHERE id = ?", [f.brandA]);
     const res = await a.clientA.get("/api/brands");
     assert.equal(res.status, 200);
     assert.deepEqual(res.body.items.map((b) => b.id), [f.brandA]);
@@ -255,7 +255,7 @@ describe("client users", () => {
     const firstToken = res.body.inviteUrl;
     res = await a.manager.post(`/api/users/${dora.id}/invite`);
     assert.equal(res.status, 429);
-    ctx.db.run("UPDATE auth_tokens SET created_at = '2020-01-01T00:00:00.000Z' WHERE user_id = ?", [dora.id]);
+    await ctx.db.run("UPDATE auth_tokens SET created_at = '2020-01-01T00:00:00.000Z' WHERE user_id = ?", [dora.id]);
     res = await a.manager.post(`/api/users/${dora.id}/invite`);
     assert.equal(res.status, 200);
     assert.ok(res.body.inviteUrl);
@@ -327,7 +327,7 @@ describe("team", () => {
       assert.equal(res.status, 201);
       assert.equal(res.body.inviteUrl, undefined);
       assert.equal(res.body.emailStatus, "sent");
-      assert.equal(lastEmail(mailServer.ctx, "z@metta.test").status, "sent");
+      assert.equal((await lastEmail(mailServer.ctx, "z@metta.test")).status, "sent");
     } finally {
       await mailServer.close();
     }
@@ -370,7 +370,7 @@ describe("team", () => {
     const fresh = await login(server, { email: u.managerNone.email });
     assert.equal((await fresh.get(`/api/clients/${f.clientB}`)).status, 200);
     assert.equal((await fresh.get(`/api/clients/${f.clientA}`)).status, 404);
-    assert.ok(ctx.db.get("SELECT 1 AS y FROM notifications WHERE user_id = ? AND type = 'team.client_access'", [u.managerNone.id]));
+    assert.ok(await ctx.db.get("SELECT 1 AS y FROM notifications WHERE user_id = ? AND type = 'team.client_access'", [u.managerNone.id]));
 
     res = await a.admin.put(`/api/team/users/${u.designer.id}/clients`, { clientIds: [f.clientB] });
     assert.equal(res.status, 422);

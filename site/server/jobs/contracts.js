@@ -7,7 +7,7 @@ const MINUTE = 60 * 1000;
 // a periodic pass re-reads open envelopes from AssinaVelox ("contracts.sync")
 // so a missed webhook (or a local install without a public URL) never leaves
 // a contract stuck. ASSINAVELOX_SYNC_MINUTES = 0 turns the pass off.
-export function register(jobs, ctx) {
+export async function register(jobs, ctx) {
   const sending = new Set(); // contract ids with a send run in progress
   jobs.register(
     "contracts.send",
@@ -29,25 +29,25 @@ export function register(jobs, ctx) {
   );
 
   try {
-    ensureDefaultTemplates(ctx.db);
+    await ensureDefaultTemplates(ctx.db);
   } catch (err) {
     ctx.log?.warn?.(`[contracts] default templates not seeded: ${err.message}`);
   }
 
   let stopped = false;
-  const tick = () => {
+  const tick = async () => {
     if (stopped || !isConfigured(ctx.config)) return;
     const minutes = avSettings(ctx.config).syncMinutes;
     try {
       // Sending interrupted by a restart: resume (idempotent steps).
-      for (const row of ctx.db.all(
+      for (const row of await ctx.db.all(
         "SELECT id FROM contracts WHERE status = 'sending' AND updated_at < ?",
         [new Date(Date.now() - 2 * MINUTE).toISOString()],
       ))
         jobs.enqueue("contracts.send", { contractId: row.id });
       if (!minutes) return;
       const before = new Date(Date.now() - minutes * MINUTE).toISOString();
-      const due = ctx.db.all(
+      const due = await ctx.db.all(
         `SELECT id FROM contracts
           WHERE envelope_id IS NOT NULL
             AND (status IN ('sent', 'failed')

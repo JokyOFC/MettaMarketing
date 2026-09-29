@@ -113,14 +113,14 @@ async function videoRenditions(ctx, path, file) {
   }
 }
 
-function setStatus(db, fileId, status) {
-  db.run("UPDATE material_files SET preview_status = ? WHERE id = ?", [status, fileId]);
+async function setStatus(db, fileId, status) {
+  await db.run("UPDATE material_files SET preview_status = ? WHERE id = ?", [status, fileId]);
 }
 
 // Reuses renditions of another file that shares the same stored object
 // (copied versions, the same upload attached twice).
-function reuseFromTwin(db, file) {
-  const twin = db.get(
+async function reuseFromTwin(db, file) {
+  const twin = await db.get(
     `SELECT f.id FROM material_files f
       WHERE f.storage_key = ? AND f.id != ? AND f.preview_status = 'ready'
         AND EXISTS (SELECT 1 FROM file_renditions r WHERE r.file_id = f.id)
@@ -129,14 +129,14 @@ function reuseFromTwin(db, file) {
   );
   if (!twin) return false;
   const at = now();
-  db.tx(() => {
-    db.run("DELETE FROM file_renditions WHERE file_id = ?", [file.id]);
-    db.run(
+  await db.tx(async () => {
+    await db.run("DELETE FROM file_renditions WHERE file_id = ?", [file.id]);
+    await db.run(
       `INSERT INTO file_renditions (file_id, kind, storage_key, mime, width, height, size_bytes, created_at)
        SELECT ?, kind, storage_key, mime, width, height, size_bytes, ? FROM file_renditions WHERE file_id = ?`,
       [file.id, at, twin.id],
     );
-    setStatus(db, file.id, "ready");
+    await setStatus(db, file.id, "ready");
   });
   return true;
 }
@@ -148,13 +148,13 @@ function reuseFromTwin(db, file) {
  */
 export async function generateRenditions(ctx, fileId) {
   const { db, storage } = ctx;
-  const file = db.get("SELECT * FROM material_files WHERE id = ?", [fileId]);
+  const file = await db.get("SELECT * FROM material_files WHERE id = ?", [fileId]);
   if (!file) return null;
-  if (reuseFromTwin(db, file)) return "ready";
+  if (await reuseFromTwin(db, file)) return "ready";
 
   const plan = renditionPlan(file);
   if (!plan || (plan === "video" && !ctx.config.ffmpegPath)) {
-    setStatus(db, file.id, "unsupported");
+    await setStatus(db, file.id, "unsupported");
     return "unsupported";
   }
 
@@ -168,22 +168,22 @@ export async function generateRenditions(ctx, fileId) {
       created.push({ kind, key: stored.key, size: stored.size, width: output.width, height: output.height });
     }
     // the file may have been deleted while we worked
-    if (!db.get("SELECT 1 FROM material_files WHERE id = ?", [file.id])) {
+    if (!await db.get("SELECT 1 FROM material_files WHERE id = ?", [file.id])) {
       for (const item of created) await storage.remove(item.key);
       return null;
     }
     const at = now();
     let previous = [];
-    db.tx(() => {
-      previous = db.all("SELECT storage_key FROM file_renditions WHERE file_id = ?", [file.id]).map((row) => row.storage_key);
-      db.run("DELETE FROM file_renditions WHERE file_id = ?", [file.id]);
+    await db.tx(async () => {
+      previous = (await db.all("SELECT storage_key FROM file_renditions WHERE file_id = ?", [file.id])).map((row) => row.storage_key);
+      await db.run("DELETE FROM file_renditions WHERE file_id = ?", [file.id]);
       for (const item of created)
-        db.run(
+        await db.run(
           `INSERT INTO file_renditions (file_id, kind, storage_key, mime, width, height, size_bytes, created_at)
            VALUES (?, ?, ?, 'image/webp', ?, ?, ?, ?)`,
           [file.id, item.kind, item.key, item.width, item.height, item.size, at],
         );
-      db.run(
+      await db.run(
         `UPDATE material_files SET preview_status = 'ready',
            width = COALESCE(width, ?), height = COALESCE(height, ?) WHERE id = ?`,
         [result.size.width, result.size.height, file.id],
@@ -194,7 +194,7 @@ export async function generateRenditions(ctx, fileId) {
   } catch (err) {
     for (const item of created) await storage.remove(item.key).catch(() => {});
     ctx.log?.warn?.(`[renditions] ${file.id} (${file.ext}): ${err.message}`);
-    if (db.get("SELECT 1 FROM material_files WHERE id = ?", [file.id])) setStatus(db, file.id, "failed");
+    if (await db.get("SELECT 1 FROM material_files WHERE id = ?", [file.id])) await setStatus(db, file.id, "failed");
     return "failed";
   }
 }

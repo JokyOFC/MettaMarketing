@@ -54,9 +54,9 @@ export function slugify(text) {
   );
 }
 
-function uniqueSlug(db, base) {
+async function uniqueSlug(db, base) {
   let slug = base;
-  for (let n = 2; db.get("SELECT 1 AS yes FROM categories WHERE slug = ?", [slug]); n += 1) slug = `${base.slice(0, 56)}-${n}`;
+  for (let n = 2; await db.get("SELECT 1 AS yes FROM categories WHERE slug = ?", [slug]); n += 1) slug = `${base.slice(0, 56)}-${n}`;
   return slug;
 }
 
@@ -65,10 +65,10 @@ export default function categoriesRoutes(ctx) {
   const { db } = ctx;
   const canManage = requireCap("categories.manage");
 
-  const counts = () =>
+  const counts = async () =>
     new Map(
-      db
-        .all("SELECT category_id, COUNT(*) AS n FROM materials WHERE archived_at IS NULL GROUP BY category_id")
+      (await db
+        .all("SELECT category_id, COUNT(*) AS n FROM materials WHERE archived_at IS NULL GROUP BY category_id"))
         .map((row) => [row.category_id, row.n]),
     );
 
@@ -79,20 +79,20 @@ export default function categoriesRoutes(ctx) {
     return category;
   }
 
-  function assertCategory(id) {
-    const row = typeof id === "string" ? db.get("SELECT * FROM categories WHERE id = ?", [id]) : null;
+  async function assertCategory(id) {
+    const row = typeof id === "string" ? await db.get("SELECT * FROM categories WHERE id = ?", [id]) : null;
     if (!row) throw notFound();
     return row;
   }
 
-  function nameTaken(name, exceptId = null) {
+  async function nameTaken(name, exceptId = null) {
     return Boolean(
-      db.get("SELECT 1 AS yes FROM categories WHERE name = ? COLLATE NOCASE AND archived_at IS NULL AND id IS NOT ?", [name, exceptId]),
+      await db.get("SELECT 1 AS yes FROM categories WHERE name = ? COLLATE utf8mb4_0900_as_ci AND archived_at IS NULL AND NOT (id <=> ?)", [name, exceptId]),
     );
   }
 
   // ?area=identity&archived=1 (archived only for staff) -> { items, total }
-  router.get("/api/categories", requireAuth, (req, res) => {
+  router.get("/api/categories", requireAuth, async (req, res) => {
     const where = [];
     const params = [];
     const staff = req.user.role !== "client";
@@ -101,45 +101,45 @@ export default function categoriesRoutes(ctx) {
       where.push("area = ?");
       params.push(req.query.area);
     }
-    const rows = db.all(
+    const rows = await db.all(
       `SELECT * FROM categories ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
         ORDER BY CASE area WHEN 'identity' THEN 0 WHEN 'content' THEN 1 ELSE 2 END, sort_order, name`,
       params,
     );
-    const materialCounts = can(req.user, "categories.manage") ? counts() : null;
+    const materialCounts = can(req.user, "categories.manage") ? await counts() : null;
     res.json({ items: rows.map((row) => serialize(req, row, materialCounts)), total: rows.length });
   });
 
-  router.post("/api/categories", requireAuth, canManage, (req, res) => {
+  router.post("/api/categories", requireAuth, canManage, async (req, res) => {
     const input = parse(createSchema, req.body);
-    if (nameTaken(input.name)) throw validation({ name: "Já existe uma categoria ativa com este nome." });
+    if (await nameTaken(input.name)) throw validation({ name: "Já existe uma categoria ativa com este nome." });
     const folder = input.folder ?? input.name.replace(/[\\/:*?"<>|]/g, "-");
     const id = newId("cat");
     const at = now();
-    db.tx(() => {
-      const slug = uniqueSlug(db, slugify(input.name));
-      const last = db.get("SELECT MAX(sort_order) AS n FROM categories WHERE area = ?", [input.area]).n;
-      const sortOrder = (last ?? db.get("SELECT MAX(sort_order) AS n FROM categories").n ?? 0) + 10;
-      db.run(
+    await db.tx(async () => {
+      const slug = await uniqueSlug(db, slugify(input.name));
+      const last = (await db.get("SELECT MAX(sort_order) AS n FROM categories WHERE area = ?", [input.area])).n;
+      const sortOrder = (last ?? (await db.get("SELECT MAX(sort_order) AS n FROM categories")).n ?? 0) + 10;
+      await db.run(
         `INSERT INTO categories (id, slug, name, area, folder, sort_order, is_system, created_by, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
         [id, slug, input.name, input.area, folder, sortOrder, req.user.id, at, at],
       );
-      logActivity(req, {
+      await logActivity(req, {
         action: "category.created",
         entityType: "category",
         entityId: id,
         summary: `Categoria "${input.name}" criada em ${AREA_LABELS[input.area]}.`,
       });
     });
-    res.status(201).json({ category: serialize(req, db.get("SELECT * FROM categories WHERE id = ?", [id]), counts()) });
+    res.status(201).json({ category: serialize(req, await db.get("SELECT * FROM categories WHERE id = ?", [id]), await counts()) });
   });
 
   // Sets sort_order following `ids`; categories left out keep their relative
   // order after the listed ones of the same area.
-  router.post("/api/categories/reorder", requireAuth, canManage, (req, res) => {
+  router.post("/api/categories/reorder", requireAuth, canManage, async (req, res) => {
     const { ids } = parse(reorderSchema, req.body);
-    const all = db.all("SELECT id, area, sort_order, name FROM categories ORDER BY sort_order, name");
+    const all = await db.all("SELECT id, area, sort_order, name FROM categories ORDER BY sort_order, name");
     const known = new Set(all.map((row) => row.id));
     const unknown = ids.find((id) => !known.has(id));
     if (unknown) throw validation({ ids: "A lista contém uma categoria que não existe mais. Atualize a página." });
@@ -148,31 +148,31 @@ export default function categoriesRoutes(ctx) {
     const byId = new Map(all.map((row) => [row.id, row]));
     const ordered = [...listed, ...rest].sort((a, b) => AREA_ORDER[byId.get(a).area] - AREA_ORDER[byId.get(b).area]);
     const at = now();
-    db.tx(() => {
-      ordered.forEach((id, index) => {
+    await db.tx(async () => {
+      for (const [index, id] of ordered.entries()) {
         const sortOrder = (index + 1) * 10;
-        db.run("UPDATE categories SET sort_order = ?, updated_at = ? WHERE id = ? AND sort_order IS NOT ?", [sortOrder, at, id, sortOrder]);
-      });
-      logActivity(req, { action: "category.reordered", entityType: "category", summary: "Ordem das categorias atualizada." });
+        await db.run("UPDATE categories SET sort_order = ?, updated_at = ? WHERE id = ? AND NOT (sort_order <=> ?)", [sortOrder, at, id, sortOrder]);
+      }
+      await logActivity(req, { action: "category.reordered", entityType: "category", summary: "Ordem das categorias atualizada." });
     });
-    const rows = db.all(
+    const rows = await db.all(
       `SELECT * FROM categories WHERE archived_at IS NULL OR ? ORDER BY CASE area WHEN 'identity' THEN 0 WHEN 'content' THEN 1 ELSE 2 END, sort_order, name`,
       [queryBool(req.query.archived)],
     );
-    const materialCounts = counts();
+    const materialCounts = await counts();
     res.json({ items: rows.map((row) => serialize(req, row, materialCounts)), total: rows.length });
   });
 
-  router.patch("/api/categories/:id", requireAuth, canManage, (req, res) => {
-    const row = assertCategory(req.params.id);
+  router.patch("/api/categories/:id", requireAuth, canManage, async (req, res) => {
+    const row = await assertCategory(req.params.id);
     const input = parse(patchSchema, req.body);
     const system = row.is_system === 1;
     if (system && input.area !== undefined && input.area !== row.area)
       throw forbidden("Categorias do sistema não podem mudar de área.");
     if (system && input.archived === true) throw forbidden("Categorias do sistema não podem ser arquivadas.");
-    if (input.name !== undefined && input.name.toLowerCase() !== row.name.toLowerCase() && nameTaken(input.name, row.id))
+    if (input.name !== undefined && input.name.toLowerCase() !== row.name.toLowerCase() && await nameTaken(input.name, row.id))
       throw validation({ name: "Já existe uma categoria ativa com este nome." });
-    if (input.archived === false && row.archived_at && nameTaken(input.name ?? row.name, row.id))
+    if (input.archived === false && row.archived_at && await nameTaken(input.name ?? row.name, row.id))
       throw validation({ name: "Já existe uma categoria ativa com este nome. Renomeie antes de restaurar." });
 
     const sets = [];
@@ -204,9 +204,9 @@ export default function categoriesRoutes(ctx) {
       notes.push("restaurada");
     }
     if (sets.length) {
-      db.tx(() => {
-        db.run(`UPDATE categories SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`, [...params, now(), row.id]);
-        logActivity(req, {
+      await db.tx(async () => {
+        await db.run(`UPDATE categories SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`, [...params, now(), row.id]);
+        await logActivity(req, {
           action: input.archived === true ? "category.archived" : input.archived === false ? "category.restored" : "category.updated",
           entityType: "category",
           entityId: row.id,
@@ -214,7 +214,7 @@ export default function categoriesRoutes(ctx) {
         });
       });
     }
-    res.json({ category: serialize(req, db.get("SELECT * FROM categories WHERE id = ?", [row.id]), counts()) });
+    res.json({ category: serialize(req, await db.get("SELECT * FROM categories WHERE id = ?", [row.id]), await counts()) });
   });
 
   return router;

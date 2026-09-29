@@ -5,84 +5,94 @@
 -- evidence page, stored here in private storage.
 
 CREATE TABLE contract_template_versions (
-  id         TEXT PRIMARY KEY,
-  kind       TEXT NOT NULL CHECK (kind IN ('subscription','one_off')),
-  version    INTEGER NOT NULL,
+  id         VARCHAR(64) NOT NULL,
+  kind       VARCHAR(32) NOT NULL CHECK (kind IN ('subscription','one_off')),
+  version    INT NOT NULL,
   title      TEXT NOT NULL,
-  body       TEXT NOT NULL,
-  created_by TEXT,
-  created_at TEXT NOT NULL,
-  UNIQUE (kind, version)
-);
+  body       MEDIUMTEXT NOT NULL,
+  created_by VARCHAR(64),
+  created_at VARCHAR(32) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY contract_template_versions_kind (kind, version)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+-- One live contract (sending, sent, completed or failed) per order or
+-- subscription: services/contracts.js checks it inside the creating
+-- transaction (MySQL has no partial unique index, and order_id keeps
+-- ON DELETE SET NULL, which rules out an indexed generated column).
 CREATE TABLE contracts (
-  id                     TEXT PRIMARY KEY,
-  client_id              TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-  brand_id               TEXT REFERENCES brands(id) ON DELETE SET NULL,
-  order_id               TEXT REFERENCES orders(id) ON DELETE SET NULL,
-  subscription_id        TEXT REFERENCES subscriptions(id) ON DELETE SET NULL,
-  kind                   TEXT NOT NULL CHECK (kind IN ('subscription','one_off')),
-  template_version_id    TEXT REFERENCES contract_template_versions(id),
+  id                     VARCHAR(64) NOT NULL,
+  client_id              VARCHAR(64) NOT NULL,
+  brand_id               VARCHAR(64),
+  order_id               VARCHAR(64),
+  subscription_id        VARCHAR(64),
+  kind                   VARCHAR(32) NOT NULL CHECK (kind IN ('subscription','one_off')),
+  template_version_id    VARCHAR(64),
   title                  TEXT NOT NULL,
   -- draft (unused) · sending (steps running) · sent (waiting for signatures)
   -- · completed · refused · expired · canceled · failed (sending failed, can retry)
-  status                 TEXT NOT NULL DEFAULT 'sending'
+  status                 VARCHAR(32) NOT NULL DEFAULT 'sending'
                            CHECK (status IN ('draft','sending','sent','completed','refused','expired','canceled','failed')),
-  provider               TEXT NOT NULL DEFAULT 'assinavelox',
-  envelope_id            TEXT UNIQUE,
-  display_code           TEXT,
-  verification_code      TEXT,
+  provider               VARCHAR(64) NOT NULL DEFAULT 'assinavelox',
+  envelope_id            VARCHAR(191),
+  display_code           VARCHAR(64),
+  verification_code      VARCHAR(64),
   provider_status_label  TEXT,
-  signature_status       TEXT,
+  signature_status       VARCHAR(64),
   signature_status_label TEXT,
   client_signer_name     TEXT NOT NULL,
-  client_signer_email    TEXT NOT NULL,
-  client_signer_user_id  TEXT REFERENCES users(id) ON DELETE SET NULL,
-  client_recipient_id    TEXT,
-  client_status          TEXT,
-  client_signed_at       TEXT,
+  client_signer_email    VARCHAR(320) NOT NULL,
+  client_signer_user_id  VARCHAR(64),
+  client_recipient_id    VARCHAR(191),
+  client_status          VARCHAR(32),
+  client_signed_at       VARCHAR(32),
   metta_signer_name      TEXT NOT NULL,
-  metta_signer_email     TEXT NOT NULL,
-  metta_recipient_id     TEXT,
-  metta_status           TEXT,
-  metta_signed_at        TEXT,
+  metta_signer_email     VARCHAR(320) NOT NULL,
+  metta_recipient_id     VARCHAR(191),
+  metta_status           VARCHAR(32),
+  metta_signed_at        VARCHAR(32),
   refusal_reason         TEXT,
-  expires_in_days        INTEGER NOT NULL DEFAULT 15,
+  expires_in_days        INT NOT NULL DEFAULT 15,
   -- generated PDF sent for signature, and the files returned at completion
-  document_key           TEXT,
-  document_sha256        TEXT,
-  document_size          INTEGER,
-  document_pages         INTEGER,
-  signed_key             TEXT,
-  signed_sha256          TEXT,
-  signed_size            INTEGER,
-  evidence_key           TEXT,
-  evidence_size          INTEGER,
+  document_key           VARCHAR(255),
+  document_sha256        VARCHAR(64),
+  document_size          BIGINT,
+  document_pages         INT,
+  signed_key             VARCHAR(255),
+  signed_sha256          VARCHAR(64),
+  signed_size            BIGINT,
+  evidence_key           VARCHAR(255),
+  evidence_size          BIGINT,
   -- variables used to render the template (snapshot) and progress markers
-  data                   TEXT NOT NULL DEFAULT '{}',
-  step                   TEXT,
+  data                   MEDIUMTEXT NOT NULL DEFAULT ('{}'),
+  step                   VARCHAR(64),
   error                  TEXT,
-  attempts               INTEGER NOT NULL DEFAULT 0,
-  embed_sessions         TEXT NOT NULL DEFAULT '[]',
-  sent_at                TEXT,
-  expires_at             TEXT,
-  completed_at           TEXT,
-  refused_at             TEXT,
-  expired_at             TEXT,
-  canceled_at            TEXT,
+  attempts               INT NOT NULL DEFAULT 0,
+  embed_sessions         MEDIUMTEXT NOT NULL DEFAULT ('[]'),
+  sent_at                VARCHAR(32),
+  expires_at             VARCHAR(32),
+  completed_at           VARCHAR(32),
+  refused_at             VARCHAR(32),
+  expired_at             VARCHAR(32),
+  canceled_at            VARCHAR(32),
   cancel_reason          TEXT,
-  last_synced_at         TEXT,
-  created_by             TEXT,
-  created_at             TEXT NOT NULL,
-  updated_at             TEXT NOT NULL
-);
-CREATE INDEX contracts_client ON contracts(client_id, created_at);
-CREATE INDEX contracts_status ON contracts(status, last_synced_at);
-CREATE INDEX contracts_order ON contracts(order_id);
-CREATE INDEX contracts_subscription ON contracts(subscription_id);
--- One live contract per order or subscription (a refused/expired/canceled
--- contract can be replaced by a new one).
-CREATE UNIQUE INDEX contracts_one_open_order
-  ON contracts(order_id) WHERE order_id IS NOT NULL AND status IN ('sending','sent','completed','failed');
-CREATE UNIQUE INDEX contracts_one_open_subscription
-  ON contracts(subscription_id) WHERE subscription_id IS NOT NULL AND status IN ('sending','sent','completed','failed');
+  last_synced_at         VARCHAR(32),
+  created_by             VARCHAR(64),
+  created_at             VARCHAR(32) NOT NULL,
+  updated_at             VARCHAR(32) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY contracts_envelope (envelope_id),
+  KEY contracts_client (client_id, created_at),
+  KEY contracts_status (status, last_synced_at),
+  KEY contracts_order (order_id),
+  KEY contracts_subscription (subscription_id),
+  KEY contracts_brand (brand_id),
+  KEY contracts_template (template_version_id),
+  KEY contracts_signer_user (client_signer_user_id),
+  CONSTRAINT contracts_client_fk FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
+  CONSTRAINT contracts_brand_fk FOREIGN KEY (brand_id) REFERENCES brands(id) ON DELETE SET NULL,
+  CONSTRAINT contracts_order_fk FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL,
+  CONSTRAINT contracts_subscription_fk FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE SET NULL,
+  CONSTRAINT contracts_template_fk FOREIGN KEY (template_version_id) REFERENCES contract_template_versions(id),
+  CONSTRAINT contracts_signer_user_fk FOREIGN KEY (client_signer_user_id) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;

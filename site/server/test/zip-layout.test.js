@@ -15,7 +15,7 @@ before(async () => {
   server = await startTestServer();
   ctx = server.ctx;
   admin = await createUser(ctx, { role: "admin" });
-  const created = createClientWithBrand(ctx, { brandName: "Aurora" });
+  const created = await createClientWithBrand(ctx, { brandName: "Aurora" });
   brandId = created.brandId;
   brandName = created.brand.name;
   clientUser = await createUser(ctx, { role: "client", clientId: created.clientId });
@@ -23,8 +23,8 @@ before(async () => {
 after(() => server?.close());
 
 const released = (opts) => insertMaterial(ctx, { brandId, createdBy: admin.id, visibility: "released", ...opts });
-const paths = (req, materials, options) =>
-  zipEntries(req, loadMaterialRows(ctx.db, materials.map((m) => m.material.id)), options).map((e) => e.path);
+const paths = async (req, materials, options) =>
+  (await zipEntries(req, await loadMaterialRows(ctx.db, materials.map((m) => m.material.id)), options)).map((e) => e.path);
 
 describe("zipEntries", () => {
   test("identity files go by format, editables apart, covers never", async () => {
@@ -38,7 +38,7 @@ describe("zipEntries", () => {
         { role: "cover", filename: "capa.png", buffer: await png() },
       ],
     });
-    const list = paths(fakeReq(ctx, clientUser), [logo]);
+    const list = await paths(fakeReq(ctx, clientUser), [logo]);
     assert.deepEqual(list.sort(), [
       `${brandName}/Identidade visual/Logos/Editáveis/logo.ai`,
       `${brandName}/Identidade visual/Logos/PNG/logo.png`,
@@ -56,11 +56,11 @@ describe("zipEntries", () => {
         { role: "editable", filename: "simbolo.ai", buffer: Buffer.from("%PDF-1.4 ai") },
       ],
     });
-    assert.deepEqual(paths(fakeReq(ctx, clientUser), [logo]), [`${brandName}/Identidade visual/Logos/PNG/simbolo.png`]);
-    const staff = paths(fakeReq(ctx, admin), [logo]);
+    assert.deepEqual(await paths(fakeReq(ctx, clientUser), [logo]), [`${brandName}/Identidade visual/Logos/PNG/simbolo.png`]);
+    const staff = await paths(fakeReq(ctx, admin), [logo]);
     assert.ok(staff.includes(`${brandName}/Identidade visual/Logos/Editáveis/simbolo.ai`));
     assert.ok(!staff.some((p) => p.endsWith("rascunho.png")));
-    assert.deepEqual(paths(fakeReq(ctx, admin), [logo], { includeEditables: false }), [
+    assert.deepEqual(await paths(fakeReq(ctx, admin), [logo], { includeEditables: false }), [
       `${brandName}/Identidade visual/Logos/PNG/simbolo.png`,
     ]);
   });
@@ -78,8 +78,8 @@ describe("zipEntries", () => {
       ],
     });
     const dir = `${brandName}/Conteúdo/2026-10/Sem campanha/Lançamento-Pix`;
-    assert.deepEqual(paths(fakeReq(ctx, clientUser), [post]), [`${dir}/01-a.png`, `${dir}/02-b.png`, `${dir}/03-c.png`]);
-    assert.deepEqual(paths(fakeReq(ctx, clientUser), [post], { layout: "carousel", root: `${brandName} - Lançamento` }), [
+    assert.deepEqual(await paths(fakeReq(ctx, clientUser), [post]), [`${dir}/01-a.png`, `${dir}/02-b.png`, `${dir}/03-c.png`]);
+    assert.deepEqual(await paths(fakeReq(ctx, clientUser), [post], { layout: "carousel", root: `${brandName} - Lançamento` }), [
       `${brandName} - Lançamento/01-a.png`,
       `${brandName} - Lançamento/02-b.png`,
       `${brandName} - Lançamento/03-c.png`,
@@ -95,17 +95,17 @@ describe("zipEntries", () => {
       title: "Fonte",
       files: [{ filename: "marca.ttf", buffer: ttf(), fontDistributable: false }],
     });
-    const client = paths(fakeReq(ctx, clientUser), [deck, deck2, locked, font]);
+    const client = await paths(fakeReq(ctx, clientUser), [deck, deck2, locked, font]);
     assert.deepEqual(client.sort(), [`${brandName}/Materiais/Apresentações/deck (2).pdf`, `${brandName}/Materiais/Apresentações/deck.pdf`]);
     // identity categories come first, whatever order the rows were loaded in
-    const staff = paths(fakeReq(ctx, admin), [locked, font]);
+    const staff = await paths(fakeReq(ctx, admin), [locked, font]);
     assert.deepEqual(staff, [`${brandName}/Identidade visual/Tipografia/TTF/marca.ttf`, `${brandName}/Materiais/Apresentações/x.pdf`]);
-    assert.deepEqual(paths(fakeReq(ctx, admin), [font, locked]), staff);
+    assert.deepEqual(await paths(fakeReq(ctx, admin), [font, locked]), staff);
   });
 
   test("entries carry what the ZIP job needs", async () => {
     const logo = await released({ title: "Logo clara" });
-    const [entry] = zipEntries(fakeReq(ctx, clientUser), loadMaterialRows(ctx.db, [logo.material.id]));
+    const [entry] = await zipEntries(fakeReq(ctx, clientUser), await loadMaterialRows(ctx.db, [logo.material.id]));
     assert.equal(entry.fileId, logo.files[0].id);
     assert.equal(entry.materialId, logo.material.id);
     assert.equal(entry.versionId, logo.version.id);
@@ -140,6 +140,6 @@ test("a post released on the last evening of a month stays in that month's folde
     files: [{ role: "original", filename: "arte.png", buffer: await png() }],
   });
   // 30 Sep 2026, 23:30 BRT = 1 Oct, 02:30 UTC; no planned date
-  ctx.db.run("UPDATE materials SET released_at = ? WHERE id = ?", ["2026-10-01T02:30:00.000Z", post.material.id]);
-  assert.deepEqual(paths(fakeReq(ctx, clientUser), [post]), [`${brandName}/Conteúdo/2026-09/Sem campanha/Fim de mês/01-arte.png`]);
+  await ctx.db.run("UPDATE materials SET released_at = ? WHERE id = ?", ["2026-10-01T02:30:00.000Z", post.material.id]);
+  assert.deepEqual(await paths(fakeReq(ctx, clientUser), [post]), [`${brandName}/Conteúdo/2026-09/Sem campanha/Fim de mês/01-arte.png`]);
 });

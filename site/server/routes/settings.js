@@ -41,8 +41,8 @@ export function mercadoPagoMode(token) {
   return String(token).startsWith("TEST-") ? "test" : "production";
 }
 
-function publicSettings(db) {
-  const all = getSettings(db);
+async function publicSettings(db) {
+  const all = await getSettings(db);
   return {
     orgName: all.orgName,
     supportEmail: all.supportEmail,
@@ -75,18 +75,18 @@ export default function settingsRoutes(ctx) {
   const { db, config } = ctx;
   const admin = [requireAuth, requireCap("settings.manage")];
 
-  router.get("/api/settings", ...admin, (req, res) => {
-    res.json({ settings: publicSettings(db) });
+  router.get("/api/settings", ...admin, async (req, res) => {
+    res.json({ settings: await publicSettings(db) });
   });
 
-  router.patch("/api/settings", ...admin, (req, res) => {
+  router.patch("/api/settings", ...admin, async (req, res) => {
     const input = parse(settingsSchema, req.body);
-    const before = publicSettings(db);
+    const before = await publicSettings(db);
     const changed = Object.keys(SETTING_LABELS).filter((key) => input[key] !== undefined && input[key] !== before[key]);
     if (changed.length) {
-      db.tx(() => {
-        for (const key of changed) setSetting(db, key, input[key], req.user.id);
-        logActivity(req, {
+      await db.tx(async () => {
+        for (const key of changed) await setSetting(db, key, input[key], req.user.id);
+        await logActivity(req, {
           action: "settings.updated",
           entityType: "settings",
           summary: `Configurações atualizadas: ${changed.map((key) => SETTING_LABELS[key]).join(", ")}.`,
@@ -94,12 +94,12 @@ export default function settingsRoutes(ctx) {
         });
       });
     }
-    res.json({ settings: publicSettings(db) });
+    res.json({ settings: await publicSettings(db) });
   });
 
   router.get("/api/settings/integrations", ...admin, async (req, res) => {
     const outbox = Object.fromEntries(EMAIL_STATUSES.map((status) => [status, 0]));
-    for (const row of db.all("SELECT status, COUNT(*) AS n FROM email_outbox GROUP BY status")) outbox[row.status] = row.n;
+    for (const row of await db.all("SELECT status, COUNT(*) AS n FROM email_outbox GROUP BY status")) outbox[row.status] = row.n;
     let usage = null;
     try {
       usage = await ctx.storage.usage();
@@ -138,52 +138,52 @@ export default function settingsRoutes(ctx) {
   });
 
   // ?status=failed,not_configured&page=&pageSize= -> { items, total, counts }
-  router.get("/api/settings/outbox", ...admin, (req, res) => {
+  router.get("/api/settings/outbox", ...admin, async (req, res) => {
     const { page, pageSize, limit, offset } = paginate(req.query, { defaultSize: 30, max: 100 });
     const statuses = queryList(req.query.status).filter((status) => EMAIL_STATUSES.includes(status));
     const where = statuses.length ? `WHERE o.status IN (${statuses.map(() => "?").join(", ")})` : "";
-    const total = db.get(`SELECT COUNT(*) AS n FROM email_outbox o ${where}`, statuses).n;
-    const rows = db.all(`${OUTBOX_SELECT} ${where} ORDER BY o.created_at DESC, o.rowid DESC LIMIT ? OFFSET ?`, [...statuses, limit, offset]);
+    const total = (await db.get(`SELECT COUNT(*) AS n FROM email_outbox o ${where}`, statuses)).n;
+    const rows = await db.all(`${OUTBOX_SELECT} ${where} ORDER BY o.created_at DESC, o.seq DESC LIMIT ? OFFSET ?`, [...statuses, limit, offset]);
     const counts = Object.fromEntries(EMAIL_STATUSES.map((status) => [status, 0]));
-    for (const row of db.all("SELECT status, COUNT(*) AS n FROM email_outbox GROUP BY status")) counts[row.status] = row.n;
+    for (const row of await db.all("SELECT status, COUNT(*) AS n FROM email_outbox GROUP BY status")) counts[row.status] = row.n;
     res.json({ items: rows.map(serializeEmail), total, counts, page, pageSize, configured: ctx.mailer.isConfigured() });
   });
 
   router.post("/api/settings/outbox/:id/retry", ...admin, async (req, res) => {
-    const row = db.get("SELECT * FROM email_outbox WHERE id = ?", [String(req.params.id)]);
+    const row = await db.get("SELECT * FROM email_outbox WHERE id = ?", [String(req.params.id)]);
     if (!row) throw notFound();
     if (row.status === "sent") throw conflict("Este e-mail já foi enviado.");
     if (row.status === "queued") throw conflict("Este e-mail ainda está sendo enviado. Aguarde um instante.");
     if (!ctx.mailer.isConfigured())
       throw notConfigured("O envio de e-mails não está configurado no servidor. Configure o SMTP e tente de novo.");
     const result = await ctx.mailer.retry(row.id);
-    logActivity(req, {
+    await logActivity(req, {
       action: "email.retried",
       entityType: "email",
       entityId: row.id,
       summary: `Reenvio do e-mail "${row.subject}" para ${row.to_email}: ${result.status === "sent" ? "enviado" : "falhou"}.`,
     });
-    res.json({ email: serializeEmail(db.get(`${OUTBOX_SELECT} WHERE o.id = ?`, [row.id])) });
+    res.json({ email: serializeEmail(await db.get(`${OUTBOX_SELECT} WHERE o.id = ?`, [row.id])) });
   });
 
   // Sends a test message to the signed-in admin.
   router.post("/api/settings/email/test", ...admin, async (req, res) => {
     if (!ctx.mailer.isConfigured())
       throw notConfigured("O envio de e-mails não está configurado no servidor. Defina SMTP_URL ou SMTP_HOST e reinicie.");
-    const { orgName } = publicSettings(db);
+    const { orgName } = await publicSettings(db);
     const message = renderEmail({
       title: "E-mail de teste",
       intro: `Se você recebeu esta mensagem, o envio de e-mails da plataforma ${orgName} está funcionando.`,
       lines: ["Nenhuma ação é necessária."],
     });
     const result = await ctx.mailer.send({ to: req.user.email, toUserId: req.user.id, ...message });
-    logActivity(req, {
+    await logActivity(req, {
       action: "email.test",
       entityType: "email",
       entityId: result.id ?? null,
       summary: `E-mail de teste enviado para ${req.user.email}: ${result.status === "sent" ? "entregue ao servidor SMTP" : "falhou"}.`,
     });
-    const row = result.id ? db.get(`${OUTBOX_SELECT} WHERE o.id = ?`, [result.id]) : null;
+    const row = result.id ? await db.get(`${OUTBOX_SELECT} WHERE o.id = ?`, [result.id]) : null;
     res.json({ status: result.status, error: result.error ?? null, email: row ? serializeEmail(row) : null });
   });
 

@@ -34,10 +34,10 @@ const escapeLike = (text) => String(text).replace(/[\\%_]/g, (c) => `\\${c}`);
 const brDate = (value) => (value ? value.split("-").reverse().join("/") : null);
 
 // Runs `... IN (?)` with the list expanded (lists here are small).
-function allIn(db, sql, ids, extra = []) {
+async function allIn(db, sql, ids, extra = []) {
   const unique = [...new Set(ids.filter(Boolean))];
   if (!unique.length) return [];
-  return db.all(sql.replace("(?)", `(${placeholders(unique)})`), [...unique, ...extra]);
+  return await db.all(sql.replace("(?)", `(${placeholders(unique)})`), [...unique, ...extra]);
 }
 
 // ------------------------------------------------------------------ serialization
@@ -57,17 +57,17 @@ function emptyMaterialCounts() {
 }
 
 /** Project[] for staff lists and details (no internal notes). */
-export function serializeProjects(req, rows) {
+export async function serializeProjects(req, rows) {
   if (!rows.length) return [];
   const db = req.ctx.db;
   const ids = rows.map((row) => row.id);
   const members = new Map(ids.map((id) => [id, []]));
-  for (const row of allIn(
+  for (const row of await allIn(
     db,
     `SELECT pm.project_id, pm.role AS member_role, pm.added_at, u.id, u.name, u.role, u.status, u.job_title
        FROM project_members pm JOIN users u ON u.id = pm.user_id
       WHERE pm.project_id IN (?)
-      ORDER BY CASE pm.role WHEN 'lead' THEN 0 ELSE 1 END, pm.added_at, u.name COLLATE NOCASE`,
+      ORDER BY CASE pm.role WHEN 'lead' THEN 0 ELSE 1 END, pm.added_at, u.name COLLATE utf8mb4_0900_ai_ci`,
     ids,
   ))
     members.get(row.project_id).push({
@@ -81,14 +81,14 @@ export function serializeProjects(req, rows) {
     });
 
   const tasks = new Map(ids.map((id) => [id, emptyTaskCounts()]));
-  for (const row of allIn(db, "SELECT project_id, status, COUNT(*) AS n FROM tasks WHERE project_id IN (?) GROUP BY project_id, status", ids)) {
+  for (const row of await allIn(db, "SELECT project_id, status, COUNT(*) AS n FROM tasks WHERE project_id IN (?) GROUP BY project_id, status", ids)) {
     const counts = tasks.get(row.project_id);
     counts[row.status] = row.n;
     counts.total += row.n;
   }
 
   const materials = new Map(ids.map((id) => [id, emptyMaterialCounts()]));
-  for (const row of allIn(
+  for (const row of await allIn(
     db,
     `SELECT project_id, visibility, approval_status, COUNT(*) AS n FROM materials
       WHERE archived_at IS NULL AND project_id IN (?) GROUP BY project_id, visibility, approval_status`,
@@ -107,7 +107,7 @@ export function serializeProjects(req, rows) {
   }
 
   const kits = new Map(
-    allIn(db, "SELECT project_id, COUNT(*) AS n FROM kits WHERE status != 'archived' AND project_id IN (?) GROUP BY project_id", ids).map(
+    (await allIn(db, "SELECT project_id, COUNT(*) AS n FROM kits WHERE status != 'archived' AND project_id IN (?) GROUP BY project_id", ids)).map(
       (row) => [row.project_id, row.n],
     ),
   );
@@ -138,7 +138,7 @@ export function serializeProjects(req, rows) {
  * listProjects(req, { brandId, clientId, status, mine, q, archived }) -> Project[]
  * Scoped to the viewer. Archived projects only when asked for (status or archived).
  */
-export function listProjects(req, filters = {}) {
+export async function listProjects(req, filters = {}) {
   const scope = scopeSql.projects(req, "p");
   const where = [scope.sql];
   const params = [...scope.params];
@@ -164,22 +164,22 @@ export function listProjects(req, filters = {}) {
   const q = typeof filters.q === "string" ? filters.q.trim() : "";
   if (q) {
     const like = `%${escapeLike(q)}%`;
-    where.push("(p.name LIKE ? ESCAPE '\\' OR b.name LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')");
+    where.push("(p.name LIKE ? COLLATE utf8mb4_0900_ai_ci OR b.name LIKE ? COLLATE utf8mb4_0900_ai_ci OR c.name LIKE ? COLLATE utf8mb4_0900_ai_ci)");
     params.push(like, like, like);
   }
-  const rows = req.ctx.db.all(
+  const rows = await req.ctx.db.all(
     `${PROJECT_SELECT} WHERE ${where.join(" AND ")}
       ORDER BY CASE p.status WHEN 'in_review' THEN 0 WHEN 'in_progress' THEN 1 WHEN 'planning' THEN 2
                              WHEN 'paused' THEN 3 WHEN 'delivered' THEN 4 ELSE 5 END,
                p.due_date IS NULL, p.due_date, p.updated_at DESC`,
     params,
   );
-  return serializeProjects(req, rows);
+  return await serializeProjects(req, rows);
 }
 
-function loadProject(req, id) {
-  const row = assertProject(req, id);
-  return req.ctx.db.get(`${PROJECT_SELECT} WHERE p.id = ?`, [row.id]);
+async function loadProject(req, id) {
+  const row = await assertProject(req, id);
+  return await req.ctx.db.get(`${PROJECT_SELECT} WHERE p.id = ?`, [row.id]);
 }
 
 // Task rows with assignee, material and author names.
@@ -208,38 +208,38 @@ function serializeTask(row) {
   };
 }
 
-function projectTasks(db, projectId) {
-  return db
+async function projectTasks(db, projectId) {
+  return (await db
     .all(
       `${TASK_SELECT} WHERE t.project_id = ?
         ORDER BY CASE t.status WHEN 'todo' THEN 0 WHEN 'doing' THEN 1 WHEN 'review' THEN 2 ELSE 3 END, t.sort_order, t.created_at`,
       [projectId],
-    )
+    ))
     .map(serializeTask);
 }
 
 // ------------------------------------------------------------------ members
 
 // Can this staff user work on a project of the client? -> reason (pt-BR) or null.
-function memberProblem(db, user, clientId) {
+async function memberProblem(db, user, clientId) {
   if (!user || user.role === "client" || user.role === "finance")
     return "Escolha pessoas da equipe de gestão ou criação.";
   if (user.status === "disabled") return `${user.name} está com o acesso desativado.`;
   if (user.role === "manager") {
-    const access = db.get("SELECT 1 AS yes FROM staff_client_access WHERE user_id = ? AND client_id = ?", [user.id, clientId]);
+    const access = await db.get("SELECT 1 AS yes FROM staff_client_access WHERE user_id = ? AND client_id = ?", [user.id, clientId]);
     if (!access) return `${user.name} não tem acesso a este cliente. Um administrador pode liberar em Equipe e permissões.`;
   }
   return null;
 }
 
-function resolveMembers(db, clientId, members) {
+async function resolveMembers(db, clientId, members) {
   const ids = [...new Set(members.map((member) => member.userId))];
   if (ids.length !== members.length) throw validation({ members: "Cada pessoa aparece uma vez na equipe do projeto." });
-  const users = new Map(allIn(db, "SELECT id, name, role, status FROM users WHERE id IN (?)", ids).map((u) => [u.id, u]));
-  members.forEach((member, index) => {
-    const problem = memberProblem(db, users.get(member.userId), clientId);
+  const users = new Map((await allIn(db, "SELECT id, name, role, status FROM users WHERE id IN (?)", ids)).map((u) => [u.id, u]));
+  for (const [index, member] of members.entries()) {
+    const problem = await memberProblem(db, users.get(member.userId), clientId);
     if (problem) throw validation({ [`members.${index}.userId`]: problem, members: problem });
-  });
+  }
   return members.map((member) => ({ ...member, user: users.get(member.userId) }));
 }
 
@@ -250,8 +250,8 @@ function resolveMembers(db, clientId, members) {
  * notify_email = 1, the rule notify() applies; without SMTP the message stays
  * in the outbox as not_configured).
  */
-export function noticeReach(req, notificationIds = []) {
-  const people = allIn(
+export async function noticeReach(req, notificationIds = []) {
+  const people = await allIn(
     req.ctx.db,
     `SELECT u.status, u.notify_email FROM notifications n JOIN users u ON u.id = n.user_id WHERE n.id IN (?)`,
     notificationIds,
@@ -264,9 +264,9 @@ export function noticeReach(req, notificationIds = []) {
 }
 
 // Notifies the people added to a project; returns noticeReach().
-function notifyAssigned(req, project, userIds) {
-  if (!userIds.length) return noticeReach(req, []);
-  const ids = notify(req, userIds, {
+async function notifyAssigned(req, project, userIds) {
+  if (!userIds.length) return await noticeReach(req, []);
+  const ids = await notify(req, userIds, {
     type: "project.assigned",
     title: "Novo projeto atribuído",
     body: `${project.name} · ${project.brand_name} (${project.client_name})`,
@@ -282,13 +282,13 @@ function notifyAssigned(req, project, userIds) {
     ].filter(Boolean),
     actionLabel: "Abrir projeto",
   });
-  return noticeReach(req, ids);
+  return await noticeReach(req, ids);
 }
 
 // Replaces project_members; returns ids added and removed.
-function writeMembers(req, projectId, members) {
+async function writeMembers(req, projectId, members) {
   const db = req.ctx.db;
-  const current = new Map(db.all("SELECT user_id, role FROM project_members WHERE project_id = ?", [projectId]).map((r) => [r.user_id, r.role]));
+  const current = new Map((await db.all("SELECT user_id, role FROM project_members WHERE project_id = ?", [projectId])).map((r) => [r.user_id, r.role]));
   const next = new Map(members.map((member) => [member.userId, member.role]));
   const added = [];
   const removed = [];
@@ -296,13 +296,13 @@ function writeMembers(req, projectId, members) {
   const at = now();
   for (const [userId] of current) {
     if (!next.has(userId)) {
-      db.run("DELETE FROM project_members WHERE project_id = ? AND user_id = ?", [projectId, userId]);
+      await db.run("DELETE FROM project_members WHERE project_id = ? AND user_id = ?", [projectId, userId]);
       removed.push(userId);
     }
   }
   for (const [userId, role] of next) {
     if (!current.has(userId)) {
-      db.run("INSERT INTO project_members (project_id, user_id, role, added_by, added_at) VALUES (?, ?, ?, ?, ?)", [
+      await db.run("INSERT INTO project_members (project_id, user_id, role, added_by, added_at) VALUES (?, ?, ?, ?, ?)", [
         projectId,
         userId,
         role,
@@ -311,7 +311,7 @@ function writeMembers(req, projectId, members) {
       ]);
       added.push(userId);
     } else if (current.get(userId) !== role) {
-      db.run("UPDATE project_members SET role = ? WHERE project_id = ? AND user_id = ?", [role, projectId, userId]);
+      await db.run("UPDATE project_members SET role = ? WHERE project_id = ? AND user_id = ?", [role, projectId, userId]);
       changed.push(userId);
     }
   }
@@ -380,18 +380,18 @@ function checkDates(startDate, dueDate) {
   if (startDate && dueDate && dueDate < startDate) throw validation({ dueDate: "O prazo não pode ser antes do início." });
 }
 
-function assertService(db, serviceId) {
+async function assertService(db, serviceId) {
   if (!serviceId) return null;
-  const row = db.get("SELECT id, name, includes_editables FROM services WHERE id = ?", [serviceId]);
+  const row = await db.get("SELECT id, name, includes_editables FROM services WHERE id = ?", [serviceId]);
   if (!row) throw validation({ serviceId: "Este serviço não existe mais." });
   return row;
 }
 
 // Can this person be the assignee of a task in the project?
-function assertAssignee(db, project, assigneeId) {
+async function assertAssignee(db, project, assigneeId) {
   if (!assigneeId) return null;
-  const user = db.get("SELECT id, name, role, status FROM users WHERE id = ?", [assigneeId]);
-  const member = user && db.get("SELECT 1 AS yes FROM project_members WHERE project_id = ? AND user_id = ?", [project.id, user.id]);
+  const user = await db.get("SELECT id, name, role, status FROM users WHERE id = ?", [assigneeId]);
+  const member = user && await db.get("SELECT 1 AS yes FROM project_members WHERE project_id = ? AND user_id = ?", [project.id, user.id]);
   const problem =
     !user || user.role === "client" || user.role === "finance"
       ? "Escolha alguém da equipe do projeto."
@@ -400,39 +400,39 @@ function assertAssignee(db, project, assigneeId) {
         : member || user.role === "admin"
           ? null
           : user.role === "manager"
-            ? memberProblem(db, user, project.client_id)
+            ? await memberProblem(db, user, project.client_id)
             : `${user.name} não faz parte deste projeto. Adicione a pessoa à equipe primeiro.`;
   if (problem) throw validation({ assigneeId: problem });
   return user;
 }
 
-function assertTaskMaterial(db, project, materialId) {
+async function assertTaskMaterial(db, project, materialId) {
   if (!materialId) return null;
-  const row = db.get("SELECT id, title, brand_id FROM materials WHERE id = ?", [materialId]);
+  const row = await db.get("SELECT id, title, brand_id FROM materials WHERE id = ?", [materialId]);
   if (!row || row.brand_id !== project.brand_id) throw validation({ materialId: "Escolha um material da mesma marca do projeto." });
   return row;
 }
 
 // Places a task at `index` of its column and renumbers the column.
-function placeTask(db, projectId, taskId, status, index) {
-  const siblings = db
-    .all("SELECT id FROM tasks WHERE project_id = ? AND status = ? AND id != ? ORDER BY sort_order, created_at", [projectId, status, taskId])
+async function placeTask(db, projectId, taskId, status, index) {
+  const siblings = (await db
+    .all("SELECT id FROM tasks WHERE project_id = ? AND status = ? AND id != ? ORDER BY sort_order, created_at", [projectId, status, taskId]))
     .map((row) => row.id);
   const at = index === undefined ? siblings.length : Math.max(0, Math.min(index, siblings.length));
   siblings.splice(at, 0, taskId);
-  siblings.forEach((id, position) => db.run("UPDATE tasks SET sort_order = ? WHERE id = ?", [position, id]));
+  for (const [position, id] of siblings.entries()) await db.run("UPDATE tasks SET sort_order = ? WHERE id = ?", [position, id]);
 }
 
-function loadTask(req, id) {
-  const task = id ? req.ctx.db.get("SELECT * FROM tasks WHERE id = ?", [id]) : null;
+async function loadTask(req, id) {
+  const task = id ? await req.ctx.db.get("SELECT * FROM tasks WHERE id = ?", [id]) : null;
   if (!task) throw notFound();
-  const project = loadProject(req, task.project_id);
+  const project = await loadProject(req, task.project_id);
   return { task, project };
 }
 
-function notifyTaskAssignee(req, project, task, assigneeId) {
+async function notifyTaskAssignee(req, project, task, assigneeId) {
   if (!assigneeId) return;
-  notify(req, [assigneeId], {
+  await notify(req, [assigneeId], {
     type: "task.assigned",
     title: "Nova tarefa atribuída",
     body: `${task.title} · ${project.name}`,
@@ -450,9 +450,9 @@ function notifyTaskAssignee(req, project, task, assigneeId) {
   });
 }
 
-function projectPermissions(req, project) {
+async function projectPermissions(req, project) {
   const user = req.user;
-  const member = Boolean(req.ctx.db.get("SELECT 1 AS yes FROM project_members WHERE project_id = ? AND user_id = ?", [project.id, user.id]));
+  const member = Boolean(await req.ctx.db.get("SELECT 1 AS yes FROM project_members WHERE project_id = ? AND user_id = ?", [project.id, user.id]));
   return {
     canEdit: can(user, "projects.manage"),
     canManageMembers: can(user, "projects.manage"),
@@ -471,8 +471,8 @@ export default function projectsRoutes(ctx) {
   const router = Router();
   const { db } = ctx;
 
-  router.get("/api/projects", requireCap("projects.view"), (req, res) => {
-    const items = listProjects(req, {
+  router.get("/api/projects", requireCap("projects.view"), async (req, res) => {
+    const items = await listProjects(req, {
       brandId: req.query.brandId,
       clientId: req.query.clientId,
       status: req.query.status,
@@ -485,42 +485,42 @@ export default function projectsRoutes(ctx) {
 
   // Everything the "Novo projeto" form needs, in the viewer's scope: brands,
   // services and the people who may join the project.
-  router.get("/api/projects/options", requireCap("projects.manage"), (req, res) => {
+  router.get("/api/projects/options", requireCap("projects.manage"), async (req, res) => {
     const scope = scopeSql.brands(req, "b");
-    const brands = db
+    const brands = (await db
       .all(
         `SELECT b.id, b.name, b.slug, b.client_id, c.name AS client_name FROM brands b JOIN clients c ON c.id = b.client_id
           WHERE b.status = 'active' AND c.status != 'archived' AND ${scope.sql}
-          ORDER BY c.name COLLATE NOCASE, b.name COLLATE NOCASE`,
+          ORDER BY c.name COLLATE utf8mb4_0900_ai_ci, b.name COLLATE utf8mb4_0900_ai_ci`,
         scope.params,
-      )
+      ))
       .map((row) => ({ id: row.id, name: row.name, slug: row.slug, clientId: row.client_id, client: { id: row.client_id, name: row.client_name } }));
-    const services = db
-      .all("SELECT id, name, kind, includes_editables, active FROM services ORDER BY active DESC, sort_order, name COLLATE NOCASE")
+    const services = (await db
+      .all("SELECT id, name, kind, includes_editables, active FROM services ORDER BY active DESC, sort_order, name COLLATE utf8mb4_0900_ai_ci"))
       .map((row) => ({ id: row.id, name: row.name, kind: row.kind, includesEditables: bool(row.includes_editables), active: bool(row.active) }));
     let clientId = null;
-    if (req.query.brandId) clientId = assertBrand(req, String(req.query.brandId)).client_id;
-    const staff = db
-      .all(
-        `SELECT id, name, role, status, job_title FROM users
-          WHERE role IN ('admin', 'manager', 'designer') AND status != 'disabled'
-          ORDER BY CASE role WHEN 'designer' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END, name COLLATE NOCASE`,
-      )
-      .map((row) => {
-        const reason = clientId ? memberProblem(db, row, clientId) : null;
-        return { id: row.id, name: row.name, role: row.role, status: row.status, jobTitle: row.job_title ?? null, eligible: !reason, reason };
-      });
+    if (req.query.brandId) clientId = (await assertBrand(req, String(req.query.brandId))).client_id;
+    const staffRows = await db.all(
+      `SELECT id, name, role, status, job_title FROM users
+        WHERE role IN ('admin', 'manager', 'designer') AND status != 'disabled'
+        ORDER BY CASE role WHEN 'designer' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END, name COLLATE utf8mb4_0900_ai_ci`,
+    );
+    const staff = [];
+    for (const row of staffRows) {
+      const reason = clientId ? await memberProblem(db, row, clientId) : null;
+      staff.push({ id: row.id, name: row.name, role: row.role, status: row.status, jobTitle: row.job_title ?? null, eligible: !reason, reason });
+    }
     res.json({ brands, services, staff });
   });
 
-  router.post("/api/projects", requireCap("projects.manage"), (req, res) => {
+  router.post("/api/projects", requireCap("projects.manage"), async (req, res) => {
     const input = parse(createSchema, req.body);
-    const brand = assertBrand(req, input.brandId);
+    const brand = await assertBrand(req, input.brandId);
     if (brand.status !== "active") throw validation({ brandId: "Esta marca está arquivada." });
-    const service = assertService(db, input.serviceId);
+    const service = await assertService(db, input.serviceId);
     checkDates(input.startDate, input.dueDate);
     const rawMembers = input.members ?? (input.memberIds ?? []).map((userId) => ({ userId, role: null }));
-    const members = resolveMembers(db, brand.client_id, rawMembers).map((member) => ({
+    const members = (await resolveMembers(db, brand.client_id, rawMembers)).map((member) => ({
       userId: member.userId,
       role: member.role ?? (member.user.role === "designer" ? "designer" : "lead"),
     }));
@@ -529,8 +529,8 @@ export default function projectsRoutes(ctx) {
     const at = now();
     const status = input.status ?? "planning";
     let reach;
-    db.tx(() => {
-      db.run(
+    await db.tx(async () => {
+      await db.run(
         `INSERT INTO projects (id, brand_id, service_id, name, description, status, includes_editables, start_date, due_date,
            delivered_at, internal_notes, created_by, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -551,9 +551,9 @@ export default function projectsRoutes(ctx) {
           at,
         ],
       );
-      const { added } = writeMembers(req, id, members);
-      const project = db.get(`${PROJECT_SELECT} WHERE p.id = ?`, [id]);
-      logActivity(req, {
+      const { added } = await writeMembers(req, id, members);
+      const project = await db.get(`${PROJECT_SELECT} WHERE p.id = ?`, [id]);
+      await logActivity(req, {
         action: "project.created",
         entityType: "project",
         entityId: id,
@@ -564,44 +564,44 @@ export default function projectsRoutes(ctx) {
         visibility: "client",
         data: { members: members.length, serviceId: service?.id ?? null },
       });
-      reach = notifyAssigned(req, project, added);
+      reach = await notifyAssigned(req, project, added);
     });
-    const [project] = serializeProjects(req, [db.get(`${PROJECT_SELECT} WHERE p.id = ?`, [id])]);
+    const [project] = await serializeProjects(req, [await db.get(`${PROJECT_SELECT} WHERE p.id = ?`, [id])]);
     res.status(201).json({ project, ...reach });
   });
 
-  router.get("/api/projects/:id", requireCap("projects.view"), (req, res) => {
-    const row = loadProject(req, req.params.id);
-    const [project] = serializeProjects(req, [row]);
+  router.get("/api/projects/:id", requireCap("projects.view"), async (req, res) => {
+    const row = await loadProject(req, req.params.id);
+    const [project] = await serializeProjects(req, [row]);
     project.internalNotes = row.internal_notes ?? null;
-    project.createdBy = row.created_by ? userRef(db.get("SELECT id, name, role FROM users WHERE id = ?", [row.created_by])) : null;
-    const kits = db
+    project.createdBy = row.created_by ? userRef(await db.get("SELECT id, name, role FROM users WHERE id = ?", [row.created_by])) : null;
+    const kits = (await db
       .all(
         `SELECT k.id, k.name, k.kind, k.status, k.released_at, (SELECT COUNT(*) FROM kit_items ki WHERE ki.kit_id = k.id) AS item_count
            FROM kits k WHERE k.project_id = ? AND k.status != 'archived' ORDER BY k.created_at`,
         [row.id],
-      )
+      ))
       .map((kit) => ({ id: kit.id, name: kit.name, kind: kit.kind, status: kit.status, releasedAt: kit.released_at ?? null, itemCount: kit.item_count }));
     const materials = can(req.user, "materials.view")
-      ? listMaterials(req, { projectId: row.id, sort: "updated" }, { page: 1, pageSize: 60 })
+      ? await listMaterials(req, { projectId: row.id, sort: "updated" }, { page: 1, pageSize: 60 })
       : { items: [], total: 0 };
-    const activity = db
-      .all(`${ACTIVITY_SELECT} WHERE a.project_id = ? ORDER BY a.created_at DESC, a.id DESC LIMIT 40`, [row.id])
+    const activity = (await db
+      .all(`${ACTIVITY_SELECT} WHERE a.project_id = ? ORDER BY a.created_at DESC, a.id DESC LIMIT 40`, [row.id]))
       .map((entry) => serializeActivity(req, entry));
     res.json({
       project,
-      tasks: projectTasks(db, row.id),
+      tasks: await projectTasks(db, row.id),
       kits,
       materials,
       activity,
-      permissions: projectPermissions(req, row),
+      permissions: await projectPermissions(req, row),
     });
   });
 
-  router.patch("/api/projects/:id", requireCap("projects.manage"), (req, res) => {
-    const row = loadProject(req, req.params.id);
+  router.patch("/api/projects/:id", requireCap("projects.manage"), async (req, res) => {
+    const row = await loadProject(req, req.params.id);
     const input = parse(patchSchema, req.body);
-    const service = input.serviceId !== undefined ? assertService(db, input.serviceId) : undefined;
+    const service = input.serviceId !== undefined ? await assertService(db, input.serviceId) : undefined;
     checkDates(input.startDate !== undefined ? input.startDate : row.start_date, input.dueDate !== undefined ? input.dueDate : row.due_date);
 
     const sets = [];
@@ -627,12 +627,12 @@ export default function projectsRoutes(ctx) {
       if (input.status !== "delivered" && input.status !== "archived" && row.delivered_at) set("delivered_at", null, "deliveredAt");
     }
     if (sets.length) {
-      db.tx(() => {
+      await db.tx(async () => {
         sets.push("updated_at = ?");
         params.push(now());
-        db.run(`UPDATE projects SET ${sets.join(", ")} WHERE id = ?`, [...params, row.id]);
+        await db.run(`UPDATE projects SET ${sets.join(", ")} WHERE id = ?`, [...params, row.id]);
         if (statusChange)
-          logActivity(req, {
+          await logActivity(req, {
             action: "project.status_changed",
             entityType: "project",
             entityId: row.id,
@@ -643,7 +643,7 @@ export default function projectsRoutes(ctx) {
           });
         const others = changed.filter((key) => key !== "status" && key !== "deliveredAt");
         if (others.length)
-          logActivity(req, {
+          await logActivity(req, {
             action: "project.updated",
             entityType: "project",
             entityId: row.id,
@@ -653,30 +653,30 @@ export default function projectsRoutes(ctx) {
           });
       });
     }
-    const fresh = db.get(`${PROJECT_SELECT} WHERE p.id = ?`, [row.id]);
-    const [project] = serializeProjects(req, [fresh]);
+    const fresh = await db.get(`${PROJECT_SELECT} WHERE p.id = ?`, [row.id]);
+    const [project] = await serializeProjects(req, [fresh]);
     project.internalNotes = fresh.internal_notes ?? null;
     res.json({ project });
   });
 
-  router.put("/api/projects/:id/members", requireCap("projects.manage"), (req, res) => {
-    const row = loadProject(req, req.params.id);
+  router.put("/api/projects/:id/members", requireCap("projects.manage"), async (req, res) => {
+    const row = await loadProject(req, req.params.id);
     const input = parse(membersSchema, req.body);
-    resolveMembers(db, row.client_id, input.members);
+    await resolveMembers(db, row.client_id, input.members);
     let change;
     let reach;
-    db.tx(() => {
-      change = writeMembers(req, row.id, input.members);
+    await db.tx(async () => {
+      change = await writeMembers(req, row.id, input.members);
       if (change.added.length || change.removed.length || change.changed.length) {
-        const names = (ids) =>
-          allIn(db, "SELECT name FROM users WHERE id IN (?) ORDER BY name COLLATE NOCASE", ids)
+        const names = async (ids) =>
+          (await allIn(db, "SELECT name FROM users WHERE id IN (?) ORDER BY name COLLATE utf8mb4_0900_ai_ci", ids))
             .map((u) => u.name)
             .join(", ");
         const parts = [];
-        if (change.added.length) parts.push(`entrou: ${names(change.added)}`);
-        if (change.removed.length) parts.push(`saiu: ${names(change.removed)}`);
-        if (change.changed.length) parts.push(`função alterada: ${names(change.changed)}`);
-        logActivity(req, {
+        if (change.added.length) parts.push(`entrou: ${await names(change.added)}`);
+        if (change.removed.length) parts.push(`saiu: ${await names(change.removed)}`);
+        if (change.changed.length) parts.push(`função alterada: ${await names(change.changed)}`);
+        await logActivity(req, {
           action: "project.members_changed",
           entityType: "project",
           entityId: row.id,
@@ -685,30 +685,30 @@ export default function projectsRoutes(ctx) {
           data: change,
         });
       }
-      reach = notifyAssigned(req, row, change.added);
+      reach = await notifyAssigned(req, row, change.added);
     });
-    const [project] = serializeProjects(req, [db.get(`${PROJECT_SELECT} WHERE p.id = ?`, [row.id])]);
+    const [project] = await serializeProjects(req, [await db.get(`${PROJECT_SELECT} WHERE p.id = ?`, [row.id])]);
     res.json({ project, ...change, ...reach });
   });
 
   // ---------------------------------------------------------------- tasks
 
-  router.get("/api/projects/:id/tasks", requireCap("projects.view"), (req, res) => {
-    const row = loadProject(req, req.params.id);
-    const items = projectTasks(db, row.id);
+  router.get("/api/projects/:id/tasks", requireCap("projects.view"), async (req, res) => {
+    const row = await loadProject(req, req.params.id);
+    const items = await projectTasks(db, row.id);
     res.json({ items, total: items.length });
   });
 
-  router.post("/api/projects/:id/tasks", requireCap("tasks.manage"), (req, res) => {
-    const project = loadProject(req, req.params.id);
+  router.post("/api/projects/:id/tasks", requireCap("tasks.manage"), async (req, res) => {
+    const project = await loadProject(req, req.params.id);
     const input = parse(taskCreateSchema, req.body);
-    assertAssignee(db, project, input.assigneeId);
-    assertTaskMaterial(db, project, input.materialId);
+    await assertAssignee(db, project, input.assigneeId);
+    await assertTaskMaterial(db, project, input.materialId);
     const id = newId("tsk");
     const at = now();
     const status = input.status ?? "todo";
-    db.tx(() => {
-      db.run(
+    await db.tx(async () => {
+      await db.run(
         `INSERT INTO tasks (id, project_id, material_id, title, description, assignee_id, status, due_date, sort_order,
            created_by, created_at, updated_at, completed_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
@@ -727,25 +727,25 @@ export default function projectsRoutes(ctx) {
           status === "done" ? at : null,
         ],
       );
-      placeTask(db, project.id, id, status, input.sortOrder);
-      logActivity(req, {
+      await placeTask(db, project.id, id, status, input.sortOrder);
+      await logActivity(req, {
         action: "task.created",
         entityType: "task",
         entityId: id,
         projectId: project.id,
         summary: `Tarefa "${input.title}" criada no projeto ${project.name}.`,
       });
-      notifyTaskAssignee(req, project, { id, title: input.title, due_date: input.dueDate ?? null }, input.assigneeId);
+      await notifyTaskAssignee(req, project, { id, title: input.title, due_date: input.dueDate ?? null }, input.assigneeId);
     });
-    const task = serializeTask(db.get(`${TASK_SELECT} WHERE t.id = ?`, [id]));
-    res.status(201).json({ task, tasks: projectTasks(db, project.id) });
+    const task = serializeTask(await db.get(`${TASK_SELECT} WHERE t.id = ?`, [id]));
+    res.status(201).json({ task, tasks: await projectTasks(db, project.id) });
   });
 
-  router.patch("/api/tasks/:id", requireCap("tasks.manage"), (req, res) => {
-    const { task, project } = loadTask(req, req.params.id);
+  router.patch("/api/tasks/:id", requireCap("tasks.manage"), async (req, res) => {
+    const { task, project } = await loadTask(req, req.params.id);
     const input = parse(taskPatchSchema, req.body);
-    if (input.assigneeId !== undefined && input.assigneeId !== task.assignee_id) assertAssignee(db, project, input.assigneeId);
-    if (input.materialId !== undefined) assertTaskMaterial(db, project, input.materialId);
+    if (input.assigneeId !== undefined && input.assigneeId !== task.assignee_id) await assertAssignee(db, project, input.assigneeId);
+    if (input.materialId !== undefined) await assertTaskMaterial(db, project, input.materialId);
 
     const sets = [];
     const params = [];
@@ -766,15 +766,15 @@ export default function projectsRoutes(ctx) {
       set("completed_at", status === "done" ? now() : null);
     }
 
-    db.tx(() => {
+    await db.tx(async () => {
       if (sets.length) {
         set("updated_at", now());
-        db.run(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`, [...params, task.id]);
+        await db.run(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`, [...params, task.id]);
       }
-      if (moved || input.sortOrder !== undefined) placeTask(db, project.id, task.id, status, input.sortOrder);
+      if (moved || input.sortOrder !== undefined) await placeTask(db, project.id, task.id, status, input.sortOrder);
       const title = input.title ?? task.title;
       if (moved)
-        logActivity(req, {
+        await logActivity(req, {
           action: "task.moved",
           entityType: "task",
           entityId: task.id,
@@ -783,20 +783,20 @@ export default function projectsRoutes(ctx) {
           data: { from: task.status, to: status },
         });
       if (reassigned) {
-        const assignee = input.assigneeId ? db.get("SELECT name FROM users WHERE id = ?", [input.assigneeId]) : null;
-        logActivity(req, {
+        const assignee = input.assigneeId ? await db.get("SELECT name FROM users WHERE id = ?", [input.assigneeId]) : null;
+        await logActivity(req, {
           action: "task.assigned",
           entityType: "task",
           entityId: task.id,
           projectId: project.id,
           summary: assignee ? `Tarefa "${title}" atribuída a ${assignee.name}.` : `Tarefa "${title}" ficou sem responsável.`,
         });
-        notifyTaskAssignee(req, project, { id: task.id, title, due_date: input.dueDate !== undefined ? input.dueDate : task.due_date }, input.assigneeId);
+        await notifyTaskAssignee(req, project, { id: task.id, title, due_date: input.dueDate !== undefined ? input.dueDate : task.due_date }, input.assigneeId);
       }
       // work waiting for review reaches the project leads
       if (moved && status === "review") {
-        const leads = db.all("SELECT user_id FROM project_members WHERE project_id = ? AND role = 'lead'", [project.id]).map((r) => r.user_id);
-        notify(req, leads, {
+        const leads = (await db.all("SELECT user_id FROM project_members WHERE project_id = ? AND role = 'lead'", [project.id])).map((r) => r.user_id);
+        await notify(req, leads, {
           type: "task.review",
           title: "Tarefa aguardando revisão",
           body: `${title} · ${project.name}`,
@@ -806,16 +806,16 @@ export default function projectsRoutes(ctx) {
         });
       }
     });
-    res.json({ task: serializeTask(db.get(`${TASK_SELECT} WHERE t.id = ?`, [task.id])), tasks: projectTasks(db, project.id) });
+    res.json({ task: serializeTask(await db.get(`${TASK_SELECT} WHERE t.id = ?`, [task.id])), tasks: await projectTasks(db, project.id) });
   });
 
-  router.delete("/api/tasks/:id", requireCap("tasks.manage"), (req, res) => {
-    const { task, project } = loadTask(req, req.params.id);
+  router.delete("/api/tasks/:id", requireCap("tasks.manage"), async (req, res) => {
+    const { task, project } = await loadTask(req, req.params.id);
     if (!can(req.user, "projects.manage") && task.created_by !== req.user.id)
       throw forbidden("Somente quem criou a tarefa ou a gestão do projeto pode excluí-la.");
-    db.tx(() => {
-      db.run("DELETE FROM tasks WHERE id = ?", [task.id]);
-      logActivity(req, {
+    await db.tx(async () => {
+      await db.run("DELETE FROM tasks WHERE id = ?", [task.id]);
+      await logActivity(req, {
         action: "task.deleted",
         entityType: "task",
         entityId: task.id,
@@ -826,11 +826,11 @@ export default function projectsRoutes(ctx) {
     res.status(204).end();
   });
 
-  router.get("/api/me/tasks", requireCap("projects.view"), (req, res) => {
+  router.get("/api/me/tasks", requireCap("projects.view"), async (req, res) => {
     const scope = scopeSql.projects(req, "p");
     const status = typeof req.query.status === "string" ? req.query.status : "open";
     const statusSql = status === "done" ? "t.status = 'done'" : status === "all" ? "1 = 1" : "t.status != 'done'";
-    const rows = db.all(
+    const rows = await db.all(
       `SELECT t.*, a.name AS assignee_name, a.role AS assignee_role, a.status AS assignee_status,
               m.title AS material_title, m.kind AS material_kind, cb.name AS creator_name, cb.role AS creator_role,
               p.name AS project_name, p.status AS project_status, b.id AS brand_id, b.name AS brand_name
@@ -857,16 +857,16 @@ export default function projectsRoutes(ctx) {
 
   // Client: projects of their own brands with what was released to them.
   // Counts only cover released, visible materials (drafts never show).
-  router.get("/api/portal/projects", requireCap("portal.access"), (req, res) => {
+  router.get("/api/portal/projects", requireCap("portal.access"), async (req, res) => {
     const clientId = req.user.client_id;
     const where = ["b.client_id = ?", "b.status = 'active'", "p.status != 'archived'"];
     const params = [clientId];
     if (req.query.brandId) {
-      const brand = assertBrand(req, String(req.query.brandId));
+      const brand = await assertBrand(req, String(req.query.brandId));
       where.push("p.brand_id = ?");
       params.push(brand.id);
     }
-    const rows = db.all(
+    const rows = await db.all(
       `SELECT p.id, p.name, p.description, p.status, p.brand_id, p.start_date, p.due_date, p.delivered_at,
               p.includes_editables, p.created_at, p.updated_at, b.name AS brand_name, b.slug AS brand_slug,
               b.client_id, s.name AS service_name
@@ -878,7 +878,7 @@ export default function projectsRoutes(ctx) {
     const ids = rows.map((row) => row.id);
     const visible = clientMaterialFilter("m");
     const counts = new Map();
-    for (const row of allIn(
+    for (const row of await allIn(
       db,
       `SELECT m.project_id, m.approval_status, m.requires_approval, m.delivered_at IS NOT NULL AS delivered,
               MAX(m.released_at) AS last_release, COUNT(*) AS n
@@ -897,17 +897,17 @@ export default function projectsRoutes(ctx) {
       counts.set(row.project_id, c);
     }
     const downloadable = new Set(
-      allIn(
+      (await allIn(
         db,
         `SELECT DISTINCT m.project_id FROM materials m JOIN material_files f ON f.version_id = m.released_version_id
           WHERE ${visible} AND m.download_enabled = 1 AND m.project_id IN (?) AND f.published = 1
             AND (f.role IN ('original', 'final') OR (f.role = 'editable' AND m.editable_included = 1))
             AND (f.media_kind != 'font' OR f.font_distributable = 1)`,
         ids,
-      ).map((row) => row.project_id),
+      )).map((row) => row.project_id),
     );
     const kits = new Map(ids.map((id) => [id, []]));
-    for (const kit of allIn(
+    for (const kit of await allIn(
       db,
       `SELECT k.id, k.project_id, k.name, k.kind, k.released_at,
               (SELECT COUNT(*) FROM kit_items ki JOIN materials m ON m.id = ki.material_id

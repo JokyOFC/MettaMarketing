@@ -8,24 +8,24 @@ import { now } from "./time.js";
  * 'client' entries may be shown to the client's own users; everything else is
  * staff-only. Missing brand/client ids are derived from the material/brand.
  */
-export function logActivity(source, entry) {
+export async function logActivity(source, entry) {
   const ctx = source?.ctx ?? source;
   const db = ctx.db;
   const user = source?.user ?? null;
   let { clientId = null, brandId = null, projectId = null, materialId = null } = entry;
 
   if (materialId && (!brandId || projectId === null)) {
-    const material = db.get("SELECT brand_id, project_id FROM materials WHERE id = ?", [materialId]);
+    const material = await db.get("SELECT brand_id, project_id FROM materials WHERE id = ?", [materialId]);
     if (material) {
       brandId ??= material.brand_id;
       projectId ??= material.project_id;
     }
   }
-  if (projectId && !brandId) brandId = db.get("SELECT brand_id FROM projects WHERE id = ?", [projectId])?.brand_id ?? null;
-  if (brandId && !clientId) clientId = db.get("SELECT client_id FROM brands WHERE id = ?", [brandId])?.client_id ?? null;
+  if (projectId && !brandId) brandId = (await db.get("SELECT brand_id FROM projects WHERE id = ?", [projectId]))?.brand_id ?? null;
+  if (brandId && !clientId) clientId = (await db.get("SELECT client_id FROM brands WHERE id = ?", [brandId]))?.client_id ?? null;
 
   const data = entry.data === undefined || entry.data === null ? null : JSON.stringify(entry.data);
-  const result = db.run(
+  const result = await db.run(
     `INSERT INTO activity_log (actor_id, actor_role, action, entity_type, entity_id, client_id,
        brand_id, project_id, material_id, summary, data, visibility, ip, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

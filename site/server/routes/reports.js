@@ -162,15 +162,15 @@ const reportQuery = z.object({
  * checks the ids against the viewer's scope (out of scope -> 404).
  * -> { from, to, fromIso, toIso, interval, clientId, brandId, format, audience }
  */
-export function reportRange(req, { forceInterval } = {}) {
+export async function reportRange(req, { forceInterval } = {}) {
   const q = parse(reportQuery, req.query);
   const to = q.to ?? localToday();
   const from = q.from ?? addDaysToDate(to, -89);
   if (from > to) throw validation({ from: "A data inicial precisa ser anterior à data final." });
   if (daysBetween(from, to) > 3660) throw validation({ from: "Escolha um período de até 10 anos." });
-  if (q.clientId) assertClient(req, q.clientId);
+  if (q.clientId) await assertClient(req, q.clientId);
   if (q.brandId) {
-    const brand = assertBrand(req, q.brandId);
+    const brand = await assertBrand(req, q.brandId);
     if (q.clientId && brand.client_id !== q.clientId) throw validation({ brandId: "Esta marca não pertence ao cliente escolhido." });
   }
   return {
@@ -219,13 +219,13 @@ const fileStamp = (range) => `${range.from}-a-${range.to}`;
 
 // ------------------------------------------------------------- deliveries
 
-function deliveriesReport(req, range) {
+async function deliveriesReport(req, range) {
   const db = req.ctx.db;
   const scope = scopeSql.materials(req, "m", "b");
   const where = ["v.released_at IS NOT NULL", "v.released_at >= ?", "v.released_at < ?", scope.sql];
   const params = [range.fromIso, range.toIso, ...scope.params];
   withFilters(range, where, params);
-  const rows = db.all(
+  const rows = await db.all(
     `SELECT v.id AS version_id, v.number, v.released_at, v.released_by, ru.name AS released_by_name,
             m.id AS material_id, m.title, m.kind, m.brand_id, b.name AS brand_name, b.client_id, cl.name AS client_name,
             m.category_id, cat.name AS category_name, cat.area AS category_area, m.project_id, p.name AS project_name,
@@ -250,10 +250,10 @@ function deliveriesReport(req, range) {
   const deliveredWhere = ["m.delivered_at >= ?", "m.delivered_at < ?", scope.sql];
   const deliveredParams = [range.fromIso, range.toIso, ...scope.params];
   withFilters(range, deliveredWhere, deliveredParams);
-  const delivered = db.get(
+  const delivered = (await db.get(
     `SELECT COUNT(*) AS n FROM materials m JOIN brands b ON b.id = m.brand_id WHERE ${deliveredWhere.join(" AND ")}`,
     deliveredParams,
-  ).n;
+  )).n;
 
   const series = new Map(buckets(range.from, range.to, range.interval).map((b) => [b.key, { period: b.key, start: b.start, end: b.end, total: 0, newMaterials: 0, newVersions: 0 }]));
   const byClient = new Map();
@@ -337,13 +337,13 @@ function deliveriesReport(req, range) {
 
 const DECISION_LABEL = { approved: "Aprovado", changes_requested: "Ajustes solicitados" };
 
-function approvalsReport(req, range) {
+async function approvalsReport(req, range) {
   const db = req.ctx.db;
   const scope = scopeSql.materials(req, "m", "b");
   const where = ["ap.created_at >= ?", "ap.created_at < ?", scope.sql];
   const params = [range.fromIso, range.toIso, ...scope.params];
   withFilters(range, where, params);
-  const decisions = db.all(
+  const decisions = await db.all(
     `SELECT ap.id, ap.decision, ap.created_at, ap.version_id, ap.material_id, ap.user_id, u.name AS user_name,
             v.number AS version_number, v.released_at AS version_released_at,
             m.title, m.kind, m.brand_id, b.name AS brand_name, b.client_id, cl.name AS client_name
@@ -364,7 +364,7 @@ function approvalsReport(req, range) {
   const history = new Map();
   for (let i = 0; i < materialIds.length; i += 400) {
     const chunk = materialIds.slice(i, i + 400);
-    for (const row of db.all(
+    for (const row of await db.all(
       `SELECT id, material_id, decision, created_at FROM approvals WHERE material_id IN (${chunk.map(() => "?").join(", ")})
         ORDER BY created_at, id`,
       chunk,
@@ -449,7 +449,7 @@ function approvalsReport(req, range) {
   const pendingWhere = ["m.approval_status = 'pending'", "m.visibility = 'released'", "m.archived_at IS NULL", scope.sql];
   const pendingParams = [...scope.params];
   withFilters(range, pendingWhere, pendingParams);
-  const pendingRows = db.all(
+  const pendingRows = await db.all(
     `SELECT m.id, m.title, m.kind, b.id AS brand_id, b.name AS brand_name, b.client_id, cl.name AS client_name,
             rv.number AS version_number, rv.released_at
        FROM materials m
@@ -539,7 +539,7 @@ function csvMaterialList(list, max = 10) {
   return `${titles.slice(0, max).join(", ")} e mais ${titles.length - max}`;
 }
 
-function downloadsReport(req, range) {
+async function downloadsReport(req, range) {
   const db = req.ctx.db;
   const scope = scopeSql.clients(req, "cl");
   const base = ["de.created_at >= ?", "de.created_at < ?", scope.sql];
@@ -553,7 +553,7 @@ function downloadsReport(req, range) {
        LEFT JOIN material_files f ON f.id = de.file_id
        LEFT JOIN zip_jobs z ON z.id = de.zip_job_id`;
   const audienceSql = { client: "u.role = 'client'", team: "u.role <> 'client'", all: "1 = 1" }[range.audience];
-  const rows = db.all(
+  const rows = await db.all(
     `SELECT de.id, de.kind, de.scope, de.created_at, de.user_id, u.name AS user_name, u.role AS user_role,
             de.client_id, cl.name AS client_name, de.brand_id, b.name AS brand_name,
             de.material_id, m.title AS material_title, m.kind AS material_kind,
@@ -580,7 +580,7 @@ function downloadsReport(req, range) {
   const wantedIds = [...wanted];
   for (let i = 0; i < wantedIds.length; i += 400) {
     const chunk = wantedIds.slice(i, i + 400);
-    for (const row of db.all(
+    for (const row of await db.all(
       `SELECT m.id, m.title, m.kind, b.id AS brand_id, b.name AS brand_name, cl.id AS client_id, cl.name AS client_name
          FROM materials m JOIN brands b ON b.id = m.brand_id JOIN clients cl ON cl.id = b.client_id
         WHERE m.id IN (${chunk.map(() => "?").join(", ")})`,
@@ -604,7 +604,7 @@ function downloadsReport(req, range) {
   // How many events the audience filter left out (e.g. team downloads).
   const excluded = range.audience === "all"
     ? 0
-    : db.get(`SELECT COUNT(*) AS n ${FROM} WHERE ${[...base, `NOT (${audienceSql})`].join(" AND ")}`, baseParams).n;
+    : (await db.get(`SELECT COUNT(*) AS n ${FROM} WHERE ${[...base, `NOT (${audienceSql})`].join(" AND ")}`, baseParams)).n;
 
   const series = new Map(buckets(range.from, range.to, range.interval).map((b) => [b.key, { period: b.key, start: b.start, end: b.end, files: 0, zips: 0, total: 0 }]));
   const byClient = new Map();
@@ -723,7 +723,7 @@ const MOVEMENT_LABEL = { paid: "Pago", pending: "Pendente", failed: "Falhou" };
 const PAID_PAYMENT = new Set(["approved"]);
 const FAILED_PAYMENT = new Set(["rejected", "cancelled", "charged_back"]);
 
-function financeReport(req, range) {
+async function financeReport(req, range) {
   const db = req.ctx.db;
   const scope = scopeSql.clients(req, "cl");
   const movements = [];
@@ -732,7 +732,7 @@ function financeReport(req, range) {
   const orderWhere = [scope.sql, "o.status IN ('paid', 'pending_payment', 'failed')"];
   const orderParams = [...scope.params];
   withFilters(range, orderWhere, orderParams, { client: "o.client_id", brand: "o.brand_id" });
-  for (const row of db.all(
+  for (const row of await db.all(
     `SELECT o.id, o.status, o.amount_cents, o.description, o.due_date, o.paid_at, o.created_at, o.updated_at,
             o.client_id, cl.name AS client_name, o.brand_id, b.name AS brand_name
        FROM orders o JOIN clients cl ON cl.id = o.client_id LEFT JOIN brands b ON b.id = o.brand_id
@@ -765,7 +765,7 @@ function financeReport(req, range) {
       payWhere.push("p.client_id = ?");
       payParams.push(range.clientId);
     }
-    for (const row of db.all(
+    for (const row of await db.all(
       `SELECT p.id, p.status, p.amount_cents, p.paid_at, p.created_at, p.client_id, cl.name AS client_name, s.id AS subscription_id,
               sv.name AS service_name
          FROM payments p
@@ -817,7 +817,7 @@ function financeReport(req, range) {
     subWhere.push("s.client_id = ?");
     subParams.push(range.clientId);
   }
-  const subs = db.get(
+  const subs = await db.get(
     `SELECT COUNT(*) AS n, COALESCE(SUM(s.amount_cents), 0) AS cents FROM subscriptions s JOIN clients cl ON cl.id = s.client_id
       WHERE ${subWhere.join(" AND ")}`,
     subParams,
@@ -863,16 +863,16 @@ export default function reportsRoutes() {
   const router = Router();
 
   // Clients and brands the viewer can filter by.
-  router.get("/api/reports/filters", requireAuth, requireCap("reports.view", "reports.finance"), (req, res) => {
+  router.get("/api/reports/filters", requireAuth, requireCap("reports.view", "reports.finance"), async (req, res) => {
     const db = req.ctx.db;
     const clients = scopeSql.clients(req, "c");
     const brands = scopeSql.brands(req, "b");
     res.json({
-      clients: db
-        .all(`SELECT c.id, c.name, c.status FROM clients c WHERE ${clients.sql} ORDER BY c.name COLLATE NOCASE`, clients.params)
+      clients: (await db
+        .all(`SELECT c.id, c.name, c.status FROM clients c WHERE ${clients.sql} ORDER BY c.name COLLATE utf8mb4_0900_ai_ci`, clients.params))
         .map((row) => ({ id: row.id, name: row.name, status: row.status })),
-      brands: db
-        .all(`SELECT b.id, b.name, b.client_id, b.status FROM brands b WHERE ${brands.sql} ORDER BY b.name COLLATE NOCASE`, brands.params)
+      brands: (await db
+        .all(`SELECT b.id, b.name, b.client_id, b.status FROM brands b WHERE ${brands.sql} ORDER BY b.name COLLATE utf8mb4_0900_ai_ci`, brands.params))
         .map((row) => ({ id: row.id, name: row.name, clientId: row.client_id, status: row.status })),
       reports: Object.entries(REPORTS)
         .filter(([, report]) => req.user.capabilities.includes(report.cap))
@@ -881,11 +881,11 @@ export default function reportsRoutes() {
   });
 
   for (const [key, report] of Object.entries(REPORTS)) {
-    router.get(`/api/reports/${key}`, requireAuth, requireCap(report.cap), (req, res) => {
-      const range = reportRange(req, { forceInterval: report.interval && !req.query.interval ? report.interval : undefined });
-      const { data, csv } = report.build(req, range);
+    router.get(`/api/reports/${key}`, requireAuth, requireCap(report.cap), async (req, res) => {
+      const range = await reportRange(req, { forceInterval: report.interval && !req.query.interval ? report.interval : undefined });
+      const { data, csv } = await report.build(req, range);
       if (range.format !== "csv") return res.json(data);
-      logActivity(req, {
+      await logActivity(req, {
         action: "report.exported",
         entityType: "report",
         entityId: key,

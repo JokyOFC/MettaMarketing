@@ -79,8 +79,8 @@ before(async () => {
   server = await startTestServer();
   ctx = server.ctx;
   db = server.db;
-  const A = createClientWithBrand(ctx, { name: "Aurora Pagamentos", brandName: "Aurora" });
-  const B = createClientWithBrand(ctx, { name: "Boreal", brandName: "Boreal" });
+  const A = await createClientWithBrand(ctx, { name: "Aurora Pagamentos", brandName: "Aurora" });
+  const B = await createClientWithBrand(ctx, { name: "Boreal", brandName: "Boreal" });
   f.brandA = A.brandId;
   f.brandB = B.brandId;
   u.admin = await createUser(ctx, { role: "admin" });
@@ -88,8 +88,8 @@ before(async () => {
   u.clientA = await createUser(ctx, { role: "client", clientId: A.clientId });
   u.clientA2 = await createUser(ctx, { role: "client", clientId: A.clientId });
   u.clientB = await createUser(ctx, { role: "client", clientId: B.clientId });
-  addStaffAccess(ctx, u.manager.id, A.clientId);
-  f.project = createProject(ctx, { brandId: A.brandId, name: "Identidade" }).id;
+  await addStaffAccess(ctx, u.manager.id, A.clientId);
+  f.project = (await createProject(ctx, { brandId: A.brandId, name: "Identidade" })).id;
 
   f.logoPng = await png({ width: 200, height: 100 });
   f.logoSvg = svg();
@@ -128,11 +128,11 @@ describe("single downloads", () => {
     assert.equal(res.headers.get("content-type"), "image/png");
     assert.match(res.headers.get("content-disposition"), /^attachment; filename="logo.png"/);
     assert.ok(res.body.equals(f.logoPng), "original quality");
-    const event = db.get("SELECT * FROM download_events WHERE file_id = ?", [pngFile.id]);
+    const event = await db.get("SELECT * FROM download_events WHERE file_id = ?", [pngFile.id]);
     assert.equal(event.kind, "file");
     assert.equal(event.user_id, u.clientA.id);
     assert.equal(event.material_id, f.logo.material.id);
-    assert.equal(db.get("SELECT approval_status FROM materials WHERE id = ?", [f.logo.material.id]).approval_status, "pending");
+    assert.equal((await db.get("SELECT approval_status FROM materials WHERE id = ?", [f.logo.material.id])).approval_status, "pending");
 
     const history = await a.manager.get(`/api/materials/${f.logo.material.id}/history`);
     const entry = history.body.downloads.find((d) => d.fileId === pngFile.id);
@@ -159,11 +159,11 @@ describe("single downloads", () => {
     const [body, mac] = link.body.url.slice(4).split(".");
     assert.equal((await a.clientA.get(`/dl/${body}.${mac.slice(0, -2)}xx`)).status, 404, "tampered");
     // a link issued before the download was disabled no longer works
-    db.run("UPDATE materials SET download_enabled = 0 WHERE id = ?", [f.logo.material.id]);
+    await db.run("UPDATE materials SET download_enabled = 0 WHERE id = ?", [f.logo.material.id]);
     const late = await a.clientA.get(link.body.url);
     assert.equal(late.status, 403);
     assert.equal(late.body.error.code, "download_disabled");
-    db.run("UPDATE materials SET download_enabled = 1 WHERE id = ?", [f.logo.material.id]);
+    await db.run("UPDATE materials SET download_enabled = 1 WHERE id = ?", [f.logo.material.id]);
   });
 
   test("expired links answer 410", async () => {
@@ -236,7 +236,7 @@ describe("ZIP packages", () => {
     assert.ok(pngEntry.data.equals(f.logoPng));
     assert.ok(svgEntry.data.equals(f.logoSvg));
     assert.equal(res.headers.get("content-type"), "application/zip");
-    const event = db.get("SELECT * FROM download_events WHERE zip_job_id = ?", [job.id]);
+    const event = await db.get("SELECT * FROM download_events WHERE zip_job_id = ?", [job.id]);
     assert.equal(event.kind, "zip");
     assert.deepEqual(JSON.parse(event.scope), { type: "brand_kit", brandId: f.brandA });
 
@@ -286,9 +286,9 @@ describe("ZIP packages", () => {
   });
 
   test("identical requests reuse the job; only the owner follows it", async () => {
-    const first = await finished(a.clientA, (await startZip(a.clientA, { type: "category", brandId: f.brandA, categoryId: db.get("SELECT category_id FROM materials WHERE id = ?", [f.logo.material.id]).category_id })).id);
+    const first = await finished(a.clientA, (await startZip(a.clientA, { type: "category", brandId: f.brandA, categoryId: (await db.get("SELECT category_id FROM materials WHERE id = ?", [f.logo.material.id])).category_id })).id);
     assert.equal(first.status, "ready");
-    const again = await startZip(a.clientA, { type: "category", brandId: f.brandA, categoryId: db.get("SELECT category_id FROM materials WHERE id = ?", [f.logo.material.id]).category_id });
+    const again = await startZip(a.clientA, { type: "category", brandId: f.brandA, categoryId: (await db.get("SELECT category_id FROM materials WHERE id = ?", [f.logo.material.id])).category_id });
     assert.equal(again.id, first.id);
     assert.equal((await a.clientA2.get(`/api/zips/${first.id}`)).status, 404);
     assert.equal((await a.clientA2.post(`/api/zips/${first.id}/link`)).status, 404);
@@ -326,33 +326,33 @@ describe("ZIP packages", () => {
   test("access revoked after generation -> the link stops working", async () => {
     const job = await finished(a.clientA, (await startZip(a.clientA, { type: "selection", fileIds: [f.fontFree.files[0].id] })).id);
     const link = await a.clientA.post(`/api/zips/${job.id}/link`);
-    db.run("UPDATE materials SET archived_at = ? WHERE id = ?", [now(), f.fontFree.material.id]);
+    await db.run("UPDATE materials SET archived_at = ? WHERE id = ?", [now(), f.fontFree.material.id]);
     const res = await a.clientA.get(link.body.url);
     assert.equal(res.status, 410);
-    db.run("UPDATE materials SET archived_at = NULL WHERE id = ?", [f.fontFree.material.id]);
+    await db.run("UPDATE materials SET archived_at = NULL WHERE id = ?", [f.fontFree.material.id]);
   });
 
   test("restart marks running jobs failed; expired ZIPs are removed", async () => {
     const orphan = newId("zip");
-    db.run(
+    await db.run(
       `INSERT INTO zip_jobs (id, user_id, scope, label, filename, status, created_at, started_at)
        VALUES (?, ?, '{"type":"brand_kit"}', 'Kit', 'kit.zip', 'running', ?, ?)`,
       [orphan, u.clientA.id, now(), now()],
     );
-    assert.ok(failInterruptedZips(ctx) >= 1);
-    const row = db.get("SELECT * FROM zip_jobs WHERE id = ?", [orphan]);
+    assert.ok(await failInterruptedZips(ctx) >= 1);
+    const row = await db.get("SELECT * FROM zip_jobs WHERE id = ?", [orphan]);
     assert.equal(row.status, "failed");
     assert.match(row.error, /reiniciou/);
     assert.equal(await runZipJob(ctx, orphan), null, "only queued jobs run");
 
     const { job } = await downloadZip(a.clientA, { type: "carousel", materialId: f.logo.material.id });
-    const key = db.get("SELECT storage_key FROM zip_jobs WHERE id = ?", [job.id]).storage_key;
-    db.run("UPDATE zip_jobs SET expires_at = ? WHERE id = ?", [new Date(Date.now() - 1000).toISOString(), job.id]);
+    const key = (await db.get("SELECT storage_key FROM zip_jobs WHERE id = ?", [job.id])).storage_key;
+    await db.run("UPDATE zip_jobs SET expires_at = ? WHERE id = ?", [new Date(Date.now() - 1000).toISOString(), job.id]);
     assert.equal((await a.clientA.get(`/api/zips/${job.id}`)).body.job.status, "expired");
     const link = await a.clientA.post(`/api/zips/${job.id}/link`);
     assert.equal(link.status, 410);
     assert.ok((await expireZips(ctx)) >= 1);
-    assert.equal(db.get("SELECT status FROM zip_jobs WHERE id = ?", [job.id]).status, "expired");
+    assert.equal((await db.get("SELECT status FROM zip_jobs WHERE id = ?", [job.id])).status, "expired");
     assert.equal(await ctx.storage.exists(key), false);
   });
 });
@@ -371,8 +371,8 @@ describe("failures surface when the link is asked for", () => {
     });
     const job = await finished(a.clientA, (await startZip(a.clientA, { type: "selection", materialIds: [guide.material.id] })).id);
     assert.equal(job.status, "ready");
-    const key = db.get("SELECT storage_key FROM zip_jobs WHERE id = ?", [job.id]).storage_key;
-    db.run("UPDATE materials SET download_enabled = 0 WHERE id = ?", [guide.material.id]);
+    const key = (await db.get("SELECT storage_key FROM zip_jobs WHERE id = ?", [job.id])).storage_key;
+    await db.run("UPDATE materials SET download_enabled = 0 WHERE id = ?", [guide.material.id]);
     try {
       const link = await a.clientA.post(`/api/zips/${job.id}/link`);
       assert.equal(link.status, 410);
@@ -384,7 +384,7 @@ describe("failures surface when the link is asked for", () => {
       assert.equal(await ctx.storage.exists(key), false, "the unusable package is freed");
       assert.equal((await a.clientA.post(`/api/zips/${job.id}/link`)).status, 410);
     } finally {
-      db.run("UPDATE materials SET download_enabled = 1 WHERE id = ?", [guide.material.id]);
+      await db.run("UPDATE materials SET download_enabled = 1 WHERE id = ?", [guide.material.id]);
     }
   });
 
@@ -395,7 +395,7 @@ describe("failures surface when the link is asked for", () => {
       files: [{ filename: "deck-comercial.pdf", buffer: Buffer.from("%PDF-1.4 deck comercial") }],
     });
     const job = await finished(a.clientA, (await startZip(a.clientA, { type: "selection", materialIds: [deck.material.id] })).id);
-    await ctx.storage.remove(db.get("SELECT storage_key FROM zip_jobs WHERE id = ?", [job.id]).storage_key);
+    await ctx.storage.remove((await db.get("SELECT storage_key FROM zip_jobs WHERE id = ?", [job.id])).storage_key);
     const link = await a.clientA.post(`/api/zips/${job.id}/link`);
     assert.equal(link.status, 410);
     assert.equal(link.body.error.message, "Este ZIP não está mais disponível. Gere o pacote de novo.");
@@ -415,7 +415,7 @@ describe("failures surface when the link is asked for", () => {
     const res = await a.clientA.get(early.body.url);
     assert.equal(res.status, 404);
     assert.equal(res.body.error.message, "O arquivo não está mais disponível no armazenamento.");
-    assert.equal(db.get("SELECT COUNT(*) AS n FROM download_events WHERE file_id = ?", [file.id]).n, 0, "a failed download is not a download");
+    assert.equal((await db.get("SELECT COUNT(*) AS n FROM download_events WHERE file_id = ?", [file.id])).n, 0, "a failed download is not a download");
     const link = await a.clientA.post("/api/downloads/link", { fileId: file.id });
     assert.equal(link.status, 404);
     assert.equal(link.body.error.code, "not_found");
@@ -468,11 +468,11 @@ describe("ZIP names", () => {
   });
 
   test("the same files asked as another scope get their own job, name and history scope", async () => {
-    const C = createClientWithBrand(ctx, { name: "Cedro Café", brandName: "Cedro" });
+    const C = await createClientWithBrand(ctx, { name: "Cedro Café", brandName: "Cedro" });
     const clientC = await createUser(ctx, { role: "client", clientId: C.clientId });
     const agent = await login(server, { email: clientC.email });
     const logo = await insertMaterial(ctx, { brandId: C.brandId, createdBy: u.admin.id, visibility: "released", title: "Logo Cedro" });
-    const categoryId = db.get("SELECT category_id FROM materials WHERE id = ?", [logo.material.id]).category_id;
+    const categoryId = (await db.get("SELECT category_id FROM materials WHERE id = ?", [logo.material.id])).category_id;
 
     const byCategory = await downloadZip(agent, { type: "category", brandId: C.brandId, categoryId });
     const kit = await downloadZip(agent, { type: "brand_kit", brandId: C.brandId });
@@ -485,7 +485,7 @@ describe("ZIP names", () => {
     assert.equal(kit.job.label, "Kit de marca · Cedro");
     assert.match(kit.job.filename, /^cedro-kit-de-marca-/);
     assert.deepEqual(kit.job.scope, { type: "brand_kit", brandId: C.brandId });
-    const event = db.get("SELECT scope FROM download_events WHERE zip_job_id = ?", [kit.job.id]);
+    const event = await db.get("SELECT scope FROM download_events WHERE zip_job_id = ?", [kit.job.id]);
     assert.deepEqual(JSON.parse(event.scope), { type: "brand_kit", brandId: C.brandId });
     // and asking the same scope again still reuses it
     assert.equal((await startZip(agent, { type: "brand_kit", brandId: C.brandId })).id, kit.job.id);

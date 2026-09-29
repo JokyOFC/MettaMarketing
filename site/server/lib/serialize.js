@@ -39,17 +39,17 @@ export function brandRef(row) {
 }
 
 // Me = { id, name, email, role, status, jobTitle, notifyEmail, client, brands, capabilities }
-export function serializeMe(req, user) {
+export async function serializeMe(req, user) {
   const db = req.ctx.db;
   let client = null;
   let brands = [];
   if (user.role === "client" && user.client_id) {
-    const row = db.get("SELECT id, name FROM clients WHERE id = ?", [user.client_id]);
+    const row = await db.get("SELECT id, name FROM clients WHERE id = ?", [user.client_id]);
     client = row ? { id: row.id, name: row.name } : null;
-    brands = db
+    brands = (await db
       .all("SELECT id, name, slug, client_id FROM brands WHERE client_id = ? AND status = 'active' ORDER BY name", [
         user.client_id,
-      ])
+      ]))
       .map(brandRef);
   }
   return {

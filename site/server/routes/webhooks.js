@@ -53,16 +53,16 @@ const clip = (value, max) => (value === null || value === undefined ? null : Str
 const daysAgo = (days) => new Date(Date.now() - days * 86400000).toISOString();
 
 /** Deletes old/overflowing log rows. Signed rows waiting for processing stay. */
-export function pruneWebhookEvents(db, retention = WEBHOOK_RETENTION) {
-  db.run(
+export async function pruneWebhookEvents(db, retention = WEBHOOK_RETENTION) {
+  await db.run(
     `DELETE FROM webhook_events
       WHERE provider = 'mercadopago' AND signature_valid = 0
         AND (received_at < ? OR id NOT IN (
-              SELECT id FROM webhook_events WHERE provider = 'mercadopago' AND signature_valid = 0
-               ORDER BY received_at DESC, rowid DESC LIMIT ?))`,
+              SELECT id FROM (SELECT id FROM webhook_events WHERE provider = 'mercadopago' AND signature_valid = 0
+               ORDER BY received_at DESC, seq DESC LIMIT ?) AS kept))`,
     [daysAgo(retention.unsignedDays), retention.unsignedKeep],
   );
-  db.run(
+  await db.run(
     `DELETE FROM webhook_events
       WHERE provider = 'mercadopago' AND signature_valid = 1 AND processed_at IS NOT NULL AND received_at < ?`,
     [daysAgo(retention.signedDays)],
@@ -124,14 +124,13 @@ export default function webhooksRoutes(ctx) {
       const error = SIGNATURE_ERRORS[signature.reason] ?? SIGNATURE_ERRORS.mismatch;
       if (!allowUnsigned(req.ip))
         return res.status(429).json({ error: { code: "rate_limited", message: "Muitas notificações sem assinatura válida." } });
-      db.tx(() => {
-        db.run(
-          `INSERT INTO webhook_events (id, provider, request_id, topic, resource_id, signature_valid, payload, received_at, error)
-           VALUES (?, 'mercadopago', ?, ?, ?, 0, NULL, ?, ?)
-           ON CONFLICT(provider, request_id) DO NOTHING`,
+      await db.tx(async () => {
+        await db.run(
+          `INSERT IGNORE INTO webhook_events (id, provider, request_id, topic, resource_id, signature_valid, payload, received_at, error)
+           VALUES (?, 'mercadopago', ?, ?, ?, 0, NULL, ?, ?)`,
           [newId("whk"), requestId, topic, resourceId, now(), parseError ?? error],
         );
-        pruneWebhookEvents(db);
+        await pruneWebhookEvents(db);
       });
       if (parseError) return res.status(400).json({ error: { code: "bad_request", message: parseError } });
       return res.status(401).json({ error: { code: "invalid_signature", message: error } });
@@ -142,35 +141,34 @@ export default function webhooksRoutes(ctx) {
     const eventId = newId("whk");
     let rowId = eventId;
     let duplicate = false;
-    db.tx(() => {
-      const inserted = db.run(
-        `INSERT INTO webhook_events (id, provider, request_id, topic, resource_id, signature_valid, payload, received_at, error)
-         VALUES (?, 'mercadopago', ?, ?, ?, 1, ?, ?, ?)
-         ON CONFLICT(provider, request_id) DO NOTHING`,
+    await db.tx(async () => {
+      const inserted = (await db.run(
+        `INSERT IGNORE INTO webhook_events (id, provider, request_id, topic, resource_id, signature_valid, payload, received_at, error)
+         VALUES (?, 'mercadopago', ?, ?, ?, 1, ?, ?, ?)`,
         [eventId, requestId, topic, resourceId, payload, now(), parseError],
-      ).changes;
+      )).changes;
       if (!inserted) {
         // Same x-request-id delivered again (or first seen without a valid signature).
-        const existing = db.get("SELECT * FROM webhook_events WHERE provider = 'mercadopago' AND request_id = ?", [requestId]);
+        const existing = await db.get("SELECT * FROM webhook_events WHERE provider = 'mercadopago' AND request_id = ?", [requestId]);
         if (existing.signature_valid && existing.processed_at && !existing.error) {
           duplicate = true;
           return;
         }
         rowId = existing.id;
-        db.run(
+        await db.run(
           `UPDATE webhook_events SET signature_valid = 1, topic = ?, resource_id = ?, payload = ?, error = ?, processed_at = NULL
             WHERE id = ?`,
           [topic, resourceId, payload, parseError, rowId],
         );
       }
-      pruneWebhookEvents(db);
+      await pruneWebhookEvents(db);
     });
     if (duplicate) return res.status(200).json({ received: true, duplicate: true });
     if (parseError) return res.status(400).json({ error: { code: "bad_request", message: parseError } });
 
     if (!mpSettings(ctx.config).token && topicKind(topic)) {
       // Mercado Pago retries later; by then the credentials may be in place.
-      db.run("UPDATE webhook_events SET error = ? WHERE id = ?", [
+      await db.run("UPDATE webhook_events SET error = ? WHERE id = ?", [
         "Mercado Pago não configurado: não foi possível confirmar a notificação na API.",
         rowId,
       ]);
@@ -188,14 +186,14 @@ export default function webhooksRoutes(ctx) {
   // is stored. The payload only carries ids: the contract is re-read from the
   // API (services/contracts.js syncContract), never trusted from the body.
   const allowUnsignedAv = unsignedLimiter();
-  const pruneAv = () => {
-    db.run(
+  const pruneAv = async () => {
+    await db.run(
       `DELETE FROM webhook_events WHERE provider = 'assinavelox' AND signature_valid = 0
-         AND (received_at < ? OR id NOT IN (SELECT id FROM webhook_events WHERE provider = 'assinavelox' AND signature_valid = 0
-                                           ORDER BY received_at DESC, rowid DESC LIMIT ?))`,
+         AND (received_at < ? OR id NOT IN (SELECT id FROM (SELECT id FROM webhook_events WHERE provider = 'assinavelox' AND signature_valid = 0
+                                           ORDER BY received_at DESC, seq DESC LIMIT ?) AS kept))`,
       [daysAgo(WEBHOOK_RETENTION.unsignedDays), WEBHOOK_RETENTION.unsignedKeep],
     );
-    db.run(
+    await db.run(
       `DELETE FROM webhook_events WHERE provider = 'assinavelox' AND signature_valid = 1 AND processed_at IS NOT NULL AND received_at < ?`,
       [daysAgo(WEBHOOK_RETENTION.signedDays)],
     );
@@ -207,7 +205,7 @@ export default function webhooksRoutes(ctx) {
     const eventType = clip(req.get("X-AssinaVelox-Event"), 80);
     if (tooLarge) return res.status(413).json({ error: { code: "payload_too_large", message: "Corpo da notificação acima do limite." } });
 
-    const check = verifyWebhook(ctx, buffer, (name) => req.get(name));
+    const check = await verifyWebhook(ctx, buffer, (name) => req.get(name));
     if (!check.valid) {
       if (!allowUnsignedAv(req.ip))
         return res.status(429).json({ error: { code: "rate_limited", message: "Muitas notificações sem assinatura válida." } });
@@ -217,14 +215,13 @@ export default function webhooksRoutes(ctx) {
           : check.reason === "bad_json"
             ? "Corpo da notificação não é um JSON válido."
             : "Assinatura inválida ou fora da janela de 5 minutos.";
-      db.tx(() => {
-        db.run(
-          `INSERT INTO webhook_events (id, provider, request_id, topic, resource_id, signature_valid, payload, received_at, error)
-           VALUES (?, 'assinavelox', ?, ?, NULL, 0, NULL, ?, ?)
-           ON CONFLICT(provider, request_id) DO NOTHING`,
+      await db.tx(async () => {
+        await db.run(
+          `INSERT IGNORE INTO webhook_events (id, provider, request_id, topic, resource_id, signature_valid, payload, received_at, error)
+           VALUES (?, 'assinavelox', ?, ?, NULL, 0, NULL, ?, ?)`,
           [newId("whk"), deliveryId, eventType, now(), error],
         );
-        pruneAv();
+        await pruneAv();
       });
       return res.status(check.reason === "bad_json" ? 400 : 401).json({ error: { code: "invalid_signature", message: error } });
     }
@@ -233,19 +230,18 @@ export default function webhooksRoutes(ctx) {
     const envelopeId = clip(event?.data?.envelope?.id, 64);
     let duplicate = false;
     let rowId = newId("whk");
-    db.tx(() => {
-      const inserted = db.run(
-        `INSERT INTO webhook_events (id, provider, request_id, topic, resource_id, signature_valid, payload, received_at)
-         VALUES (?, 'assinavelox', ?, ?, ?, 1, ?, ?)
-         ON CONFLICT(provider, request_id) DO NOTHING`,
+    await db.tx(async () => {
+      const inserted = (await db.run(
+        `INSERT IGNORE INTO webhook_events (id, provider, request_id, topic, resource_id, signature_valid, payload, received_at)
+         VALUES (?, 'assinavelox', ?, ?, ?, 1, ?, ?)`,
         [rowId, deliveryId ?? rowId, clip(event.type ?? eventType, 80), envelopeId, buffer.toString("utf8").slice(0, MAX_PAYLOAD), now()],
-      ).changes;
+      )).changes;
       if (!inserted) {
-        const existing = db.get("SELECT * FROM webhook_events WHERE provider = 'assinavelox' AND request_id = ?", [deliveryId]);
+        const existing = await db.get("SELECT * FROM webhook_events WHERE provider = 'assinavelox' AND request_id = ?", [deliveryId]);
         if (existing?.signature_valid && existing.processed_at) duplicate = true;
         else if (existing) {
           rowId = existing.id;
-          db.run("UPDATE webhook_events SET signature_valid = 1, topic = ?, resource_id = ?, payload = ?, error = NULL WHERE id = ?", [
+          await db.run("UPDATE webhook_events SET signature_valid = 1, topic = ?, resource_id = ?, payload = ?, error = NULL WHERE id = ?", [
             clip(event.type ?? eventType, 80),
             envelopeId,
             buffer.toString("utf8").slice(0, MAX_PAYLOAD),
@@ -253,18 +249,18 @@ export default function webhooksRoutes(ctx) {
           ]);
         }
       }
-      pruneAv();
+      await pruneAv();
     });
     // 2xx quickly; AssinaVelox retries anything else.
     res.status(204).end();
     if (duplicate) return;
 
-    const contract = envelopeId ? db.get("SELECT id FROM contracts WHERE envelope_id = ?", [envelopeId]) : null;
-    const done = (error = null) =>
-      db.run("UPDATE webhook_events SET processed_at = ?, error = ? WHERE id = ?", [now(), error, rowId]);
-    if (!contract) return done(envelopeId ? "Nenhum contrato da Metta usa este documento." : null);
+    const contract = envelopeId ? await db.get("SELECT id FROM contracts WHERE envelope_id = ?", [envelopeId]) : null;
+    const done = async (error = null) =>
+      await db.run("UPDATE webhook_events SET processed_at = ?, error = ? WHERE id = ?", [now(), error, rowId]);
+    if (!contract) return await done(envelopeId ? "Nenhum contrato da Metta usa este documento." : null);
     const work = ctx.jobs?.enqueue("contracts.sync", { contractId: contract.id, source: "webhook" }) ?? Promise.resolve();
-    trackWork(ctx, work.then(() => done(), (err) => done(err?.message ?? "Falha ao sincronizar.")));
+    trackWork(ctx, work.then(async () => await done(), async (err) => await done(err?.message ?? "Falha ao sincronizar.")));
   });
 
   return router;

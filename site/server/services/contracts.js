@@ -50,17 +50,17 @@ export const CONTRACT_DEFAULTS = {
   requiredBeforePayment: true,
 };
 
-export function contractSettings(db) {
-  const stored = getSetting(db, SETTINGS_KEY, null);
+export async function contractSettings(db) {
+  const stored = await getSetting(db, SETTINGS_KEY, null);
   return { ...CONTRACT_DEFAULTS, ...(stored && typeof stored === "object" ? stored : {}) };
 }
 
-export function saveContractSettings(req, patch) {
+export async function saveContractSettings(req, patch) {
   const { db } = req.ctx;
-  const next = { ...contractSettings(db), ...patch };
-  db.tx(() => {
-    setSetting(db, SETTINGS_KEY, next, req.user.id);
-    logActivity(req, {
+  const next = { ...await contractSettings(db), ...patch };
+  await db.tx(async () => {
+    await setSetting(db, SETTINGS_KEY, next, req.user.id);
+    await logActivity(req, {
       action: "contracts.settings_updated",
       entityType: "settings",
       entityId: SETTINGS_KEY,
@@ -82,11 +82,11 @@ export function settingsIssues(settings) {
 
 // ------------------------------------------------------------------ templates
 
-export function ensureDefaultTemplates(db) {
+export async function ensureDefaultTemplates(db) {
   for (const kind of KINDS) {
-    const exists = db.get("SELECT 1 FROM contract_template_versions WHERE kind = ? LIMIT 1", [kind]);
+    const exists = await db.get("SELECT 1 FROM contract_template_versions WHERE kind = ? LIMIT 1", [kind]);
     if (exists) continue;
-    db.run(
+    await db.run(
       `INSERT INTO contract_template_versions (id, kind, version, title, body, created_by, created_at)
        VALUES (?, ?, 1, ?, ?, NULL, ?)`,
       [newId("ctv"), kind, DEFAULT_TEMPLATES[kind].title, DEFAULT_TEMPLATES[kind].body, now()],
@@ -94,9 +94,9 @@ export function ensureDefaultTemplates(db) {
   }
 }
 
-export function currentTemplate(db, kind) {
-  ensureDefaultTemplates(db);
-  return db.get(
+export async function currentTemplate(db, kind) {
+  await ensureDefaultTemplates(db);
+  return await db.get(
     `SELECT t.*, u.name AS author_name FROM contract_template_versions t
       LEFT JOIN users u ON u.id = t.created_by
       WHERE t.kind = ? ORDER BY t.version DESC LIMIT 1`,
@@ -121,7 +121,7 @@ export function serializeTemplate(row) {
   };
 }
 
-export function saveTemplate(req, kind, { title, body }) {
+export async function saveTemplate(req, kind, { title, body }) {
   const { db } = req.ctx;
   if (!KINDS.includes(kind)) throw notFound("Modelo de contrato não encontrado.");
   const { unknown } = inspectTemplate(`${title}\n${body}`);
@@ -129,23 +129,23 @@ export function saveTemplate(req, kind, { title, body }) {
     throw validation({
       body: `Variáveis desconhecidas: ${unknown.map((v) => `{{${v}}}`).join(", ")}. Use as variáveis da lista.`,
     });
-  const current = currentTemplate(db, kind);
+  const current = await currentTemplate(db, kind);
   if (current.title === title && current.body === body && current.created_by) return current;
   const id = newId("ctv");
-  db.tx(() => {
-    db.run(
+  await db.tx(async () => {
+    await db.run(
       `INSERT INTO contract_template_versions (id, kind, version, title, body, created_by, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [id, kind, current.version + 1, title, body, req.user.id, now()],
     );
-    logActivity(req, {
+    await logActivity(req, {
       action: "contracts.template_saved",
       entityType: "contract_template",
       entityId: id,
       summary: `${req.user.name} salvou a versão ${current.version + 1} do modelo de contrato (${KIND_LABELS[kind]})`,
     });
   });
-  return currentTemplate(db, kind);
+  return await currentTemplate(db, kind);
 }
 
 // ------------------------------------------------------------------ helpers
@@ -171,17 +171,17 @@ export function contractCode(id) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function financeAndAdminIds(db) {
+async function financeAndAdminIds(db) {
   return [
     ...new Set([
-      ...adminIds(db),
-      ...db.all("SELECT id FROM users WHERE role = 'finance' AND status = 'active'").map((row) => row.id),
+      ...await adminIds(db),
+      ...(await db.all("SELECT id FROM users WHERE role = 'finance' AND status = 'active'")).map((row) => row.id),
     ]),
   ];
 }
 
-function userIdByEmail(db, email) {
-  return email ? (db.get("SELECT id FROM users WHERE email = ? AND status = 'active'", [email])?.id ?? null) : null;
+async function userIdByEmail(db, email) {
+  return email ? ((await db.get("SELECT id FROM users WHERE email = ? AND status = 'active'", [email]))?.id ?? null) : null;
 }
 
 // ------------------------------------------------------------------ source (order / subscription)
@@ -190,16 +190,16 @@ function userIdByEmail(db, email) {
  * Loads what a contract is about. -> { kind, client, brand, service, order,
  * subscription, amountCents, description, dueDate }
  */
-export function loadSource(db, { orderId, subscriptionId, brandId }) {
+export async function loadSource(db, { orderId, subscriptionId, brandId }) {
   if (Boolean(orderId) === Boolean(subscriptionId)) throw validation({ source: "Informe o pedido ou a assinatura." });
   if (orderId) {
-    const order = db.get("SELECT * FROM orders WHERE id = ?", [orderId]);
+    const order = await db.get("SELECT * FROM orders WHERE id = ?", [orderId]);
     if (!order) throw notFound("Não encontramos este pedido.");
-    const service = order.service_id ? db.get("SELECT * FROM services WHERE id = ?", [order.service_id]) : null;
-    const client = db.get("SELECT * FROM clients WHERE id = ?", [order.client_id]);
+    const service = order.service_id ? await db.get("SELECT * FROM services WHERE id = ?", [order.service_id]) : null;
+    const client = await db.get("SELECT * FROM clients WHERE id = ?", [order.client_id]);
     const brand =
-      (order.brand_id && db.get("SELECT * FROM brands WHERE id = ?", [order.brand_id])) ||
-      db.get("SELECT * FROM brands WHERE client_id = ? AND status = 'active' ORDER BY created_at LIMIT 1", [client.id]);
+      (order.brand_id && await db.get("SELECT * FROM brands WHERE id = ?", [order.brand_id])) ||
+      await db.get("SELECT * FROM brands WHERE client_id = ? AND status = 'active' ORDER BY created_at LIMIT 1", [client.id]);
     return {
       kind: "one_off",
       client,
@@ -214,15 +214,15 @@ export function loadSource(db, { orderId, subscriptionId, brandId }) {
       waived: Boolean(order.contract_waived_at),
     };
   }
-  const subscription = db.get("SELECT * FROM subscriptions WHERE id = ?", [subscriptionId]);
+  const subscription = await db.get("SELECT * FROM subscriptions WHERE id = ?", [subscriptionId]);
   if (!subscription) throw notFound("Não encontramos esta assinatura.");
-  const service = db.get("SELECT * FROM services WHERE id = ?", [subscription.service_id]);
-  const client = db.get("SELECT * FROM clients WHERE id = ?", [subscription.client_id]);
+  const service = await db.get("SELECT * FROM services WHERE id = ?", [subscription.service_id]);
+  const client = await db.get("SELECT * FROM clients WHERE id = ?", [subscription.client_id]);
   let brand = null;
   if (brandId) {
-    brand = db.get("SELECT * FROM brands WHERE id = ?", [brandId]);
+    brand = await db.get("SELECT * FROM brands WHERE id = ?", [brandId]);
     if (!brand || brand.client_id !== client.id) throw validation({ brandId: "Esta marca não pertence ao cliente." });
-  } else brand = db.get("SELECT * FROM brands WHERE client_id = ? AND status = 'active' ORDER BY created_at LIMIT 1", [client.id]);
+  } else brand = await db.get("SELECT * FROM brands WHERE client_id = ? AND status = 'active' ORDER BY created_at LIMIT 1", [client.id]);
   return {
     kind: "subscription",
     client,
@@ -285,8 +285,8 @@ async function renderFor({ template, source, settings, signer, code, issuedAt, p
 /** Example PDF for the template editor (sample data, "Exemplo" banner). */
 export async function renderTemplateExample(db, kind, override = null) {
   if (!KINDS.includes(kind)) throw notFound("Modelo de contrato não encontrado.");
-  const template = override ?? currentTemplate(db, kind);
-  const settings = contractSettings(db);
+  const template = override ?? await currentTemplate(db, kind);
+  const settings = await contractSettings(db);
   const sample = Object.fromEntries(VARIABLES.map((v) => [v.key, v.example]));
   const source = {
     kind,
@@ -318,19 +318,19 @@ export async function renderTemplateExample(db, kind, override = null) {
  * Whether payment must wait for the contract. Only enforced when the
  * integration is configured and the setting is on; a waiver lifts it.
  */
-export function contractGate(ctx, { orderId = null, subscriptionId = null, waived = false } = {}) {
+export async function contractGate(ctx, { orderId = null, subscriptionId = null, waived = false } = {}) {
   const { db, config } = ctx;
-  const settings = contractSettings(db);
-  const contract = latestContract(db, { orderId, subscriptionId });
+  const settings = await contractSettings(db);
+  const contract = await latestContract(db, { orderId, subscriptionId });
   const required = Boolean(settings.requiredBeforePayment) && isConfigured(config) && !waived;
   const satisfied = !required || contract?.status === "completed";
   return { required, satisfied, waived, contract };
 }
 
-export function latestContract(db, { orderId = null, subscriptionId = null }) {
-  if (orderId) return db.get("SELECT * FROM contracts WHERE order_id = ? ORDER BY created_at DESC LIMIT 1", [orderId]);
+export async function latestContract(db, { orderId = null, subscriptionId = null }) {
+  if (orderId) return await db.get("SELECT * FROM contracts WHERE order_id = ? ORDER BY created_at DESC LIMIT 1", [orderId]);
   if (subscriptionId)
-    return db.get("SELECT * FROM contracts WHERE subscription_id = ? ORDER BY created_at DESC LIMIT 1", [subscriptionId]);
+    return await db.get("SELECT * FROM contracts WHERE subscription_id = ? ORDER BY created_at DESC LIMIT 1", [subscriptionId]);
   return null;
 }
 
@@ -430,13 +430,13 @@ export const CONTRACT_SELECT = `SELECT ct.*, c.name AS client_name, b.name AS br
   LEFT JOIN brands b ON b.id = ct.brand_id
   LEFT JOIN users u ON u.id = ct.created_by`;
 
-export const getContractRow = (db, id) => (id ? db.get(`${CONTRACT_SELECT} WHERE ct.id = ?`, [id]) : null);
+export const getContractRow = async (db, id) => (id ? await db.get(`${CONTRACT_SELECT} WHERE ct.id = ?`, [id]) : null);
 
 // ------------------------------------------------------------------ create & preview
 
-function resolveSigner(db, source, signer) {
+async function resolveSigner(db, source, signer) {
   if (signer?.userId) {
-    const user = db.get("SELECT * FROM users WHERE id = ? AND client_id = ? AND status = 'active'", [signer.userId, source.client.id]);
+    const user = await db.get("SELECT * FROM users WHERE id = ? AND client_id = ? AND status = 'active'", [signer.userId, source.client.id]);
     if (!user) throw validation({ signer: "Escolha uma pessoa ativa deste cliente." });
     return { name: user.name, email: user.email.toLowerCase(), userId: user.id };
   }
@@ -446,7 +446,7 @@ function resolveSigner(db, source, signer) {
   if (name.length < 2) fields["signer.name"] = "Informe o nome de quem assina pelo cliente.";
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fields["signer.email"] = "Informe um e-mail válido.";
   if (Object.keys(fields).length) throw validation(fields);
-  const user = db.get("SELECT id FROM users WHERE email = ? AND client_id = ? AND status = 'active'", [email, source.client.id]);
+  const user = await db.get("SELECT id FROM users WHERE email = ? AND client_id = ? AND status = 'active'", [email, source.client.id]);
   return { name, email, userId: user?.id ?? null };
 }
 
@@ -465,10 +465,10 @@ function assertSendable(ctx, source, settings, templateRow) {
 
 export async function previewContract(req, { orderId, subscriptionId, brandId, signer }) {
   const { db } = req.ctx;
-  const source = loadSource(db, { orderId, subscriptionId, brandId });
-  const settings = contractSettings(db);
-  const template = currentTemplate(db, source.kind);
-  const resolved = resolveSigner(db, source, signer);
+  const source = await loadSource(db, { orderId, subscriptionId, brandId });
+  const settings = await contractSettings(db);
+  const template = await currentTemplate(db, source.kind);
+  const resolved = await resolveSigner(db, source, signer);
   const out = await renderFor({
     template,
     source,
@@ -489,16 +489,16 @@ export async function previewContract(req, { orderId, subscriptionId, brandId, s
 export async function createContract(req, { orderId, subscriptionId, brandId, signer, expiresInDays }) {
   const { ctx, user } = req;
   const { db, storage } = ctx;
-  const source = loadSource(db, { orderId, subscriptionId, brandId });
-  const settings = contractSettings(db);
-  const template = currentTemplate(db, source.kind);
+  const source = await loadSource(db, { orderId, subscriptionId, brandId });
+  const settings = await contractSettings(db);
+  const template = await currentTemplate(db, source.kind);
   assertSendable(ctx, source, settings, template);
-  const open = latestContract(db, { orderId, subscriptionId });
+  const open = await latestContract(db, { orderId, subscriptionId });
   if (open && ["sending", "sent", "failed"].includes(open.status))
     throw conflict("Já existe um contrato em andamento para este item. Cancele-o antes de enviar outro.");
   if (open?.status === "completed") throw conflict("O contrato deste item já foi concluído.");
 
-  const resolved = resolveSigner(db, source, signer);
+  const resolved = await resolveSigner(db, source, signer);
   if (resolved.email === String(settings.signerEmail).toLowerCase())
     throw validation({ "signer.email": "Quem assina pelo cliente precisa ser outra pessoa, diferente do representante da Metta." });
 
@@ -514,8 +514,13 @@ export async function createContract(req, { orderId, subscriptionId, brandId, si
     templateVersion: template.version,
   };
   try {
-    db.tx(() => {
-      db.run(
+    await db.tx(async () => {
+      // One live contract per order/subscription: checked again inside the
+      // transaction (transactions run one at a time) to close the race window.
+      const live = await latestContract(db, { orderId, subscriptionId });
+      if (live && ["sending", "sent", "failed", "completed"].includes(live.status))
+        throw conflict("Já existe um contrato em andamento para este item. Atualize a página.");
+      await db.run(
         `INSERT INTO contracts (id, client_id, brand_id, order_id, subscription_id, kind, template_version_id, title, status,
            client_signer_name, client_signer_email, client_signer_user_id, metta_signer_name, metta_signer_email,
            expires_in_days, document_key, document_sha256, document_size, document_pages, data, step,
@@ -546,7 +551,7 @@ export async function createContract(req, { orderId, subscriptionId, brandId, si
           issuedAt,
         ],
       );
-      logActivity(req, {
+      await logActivity(req, {
         action: "contract.created",
         entityType: "contract",
         entityId: id,
@@ -558,22 +563,21 @@ export async function createContract(req, { orderId, subscriptionId, brandId, si
     });
   } catch (err) {
     await storage.remove(stored.key).catch(() => {});
-    if (String(err?.message ?? "").includes("UNIQUE"))
-      throw conflict("Já existe um contrato em andamento para este item. Atualize a página.");
+    if (err?.code === "ER_DUP_ENTRY") throw conflict("Já existe um contrato em andamento para este item. Atualize a página.");
     throw err;
   }
   ctx.jobs?.enqueue("contracts.send", { contractId: id });
-  return getContractRow(db, id);
+  return await getContractRow(db, id);
 }
 
 // ------------------------------------------------------------------ sending (job)
 
 const DOCUMENT_WAIT_MS = 90_000;
 
-function update(db, id, fields) {
+async function update(db, id, fields) {
   const keys = Object.keys(fields);
   if (!keys.length) return;
-  db.run(`UPDATE contracts SET ${keys.map((k) => `${k} = ?`).join(", ")}, updated_at = ? WHERE id = ?`, [
+  await db.run(`UPDATE contracts SET ${keys.map((k) => `${k} = ?`).join(", ")}, updated_at = ? WHERE id = ?`, [
     ...keys.map((k) => fields[k]),
     now(),
     id,
@@ -593,17 +597,17 @@ async function readStored(storage, key) {
  */
 export async function runSend(ctx, contractId) {
   const { db, storage } = ctx;
-  let row = db.get("SELECT * FROM contracts WHERE id = ?", [contractId]);
+  let row = await db.get("SELECT * FROM contracts WHERE id = ?", [contractId]);
   if (!row || row.status !== "sending") return row;
   const code = contractCode(row.id);
   const data = parseJson(row.data, {});
-  const step = (name) => update(db, row.id, { step: name });
+  const step = async (name) => await update(db, row.id, { step: name });
 
   try {
     // 1. envelope
     let envelopeId = row.envelope_id;
     if (!envelopeId) {
-      step("envelope");
+      await step("envelope");
       const envelope = await avCall(ctx, "a criação do contrato", (client) =>
         client.createEnvelope(
           {
@@ -618,7 +622,7 @@ export async function runSend(ctx, contractId) {
         ),
       );
       envelopeId = envelope.id;
-      update(db, row.id, { envelope_id: envelopeId, display_code: envelope.display_code ?? null });
+      await update(db, row.id, { envelope_id: envelopeId, display_code: envelope.display_code ?? null });
     }
 
     let envelope = await avCall(ctx, "a consulta do contrato", (client) => client.getEnvelope(envelopeId));
@@ -627,7 +631,7 @@ export async function runSend(ctx, contractId) {
     if (!alreadySent) {
       // 2. document
       if (!envelope.documents?.length) {
-        step("document");
+        await step("document");
         const bytes = await readStored(storage, row.document_key);
         await avCall(ctx, "o envio do PDF do contrato", (client) =>
           client.uploadDocument(
@@ -637,7 +641,7 @@ export async function runSend(ctx, contractId) {
           ),
         );
       }
-      step("processing");
+      await step("processing");
       const started = Date.now();
       let waitMs = 600;
       for (;;) {
@@ -658,7 +662,7 @@ export async function runSend(ctx, contractId) {
       const documentId = envelope.documents[0].id;
 
       // 3. recipients (client first, then Metta)
-      step("recipients");
+      await step("recipients");
       const recipients = await avCall(ctx, "a definição de quem assina", (client) =>
         client.syncRecipients(
           envelopeId,
@@ -677,10 +681,10 @@ export async function runSend(ctx, contractId) {
       const mettaRecipient = byOrder.get(2);
       if (!clientRecipient || !mettaRecipient)
         throw new HttpError(502, "upstream_error", "A AssinaVelox não devolveu os participantes do contrato.");
-      update(db, row.id, { client_recipient_id: clientRecipient.id, metta_recipient_id: mettaRecipient.id });
+      await update(db, row.id, { client_recipient_id: clientRecipient.id, metta_recipient_id: mettaRecipient.id });
 
       // 4. fields
-      step("fields");
+      await step("fields");
       const recipientFor = { client: clientRecipient.id, metta: mettaRecipient.id };
       await avCall(ctx, "o posicionamento das assinaturas", (client) =>
         client.syncFields(
@@ -705,7 +709,7 @@ export async function runSend(ctx, contractId) {
       );
 
       // 5. send
-      step("send");
+      await step("send");
       const sent = await avCall(ctx, "o envio para assinatura", (client) =>
         client.sendEnvelope(envelopeId, { idempotencyKey: `metta-${row.id}-send` }),
       );
@@ -714,33 +718,33 @@ export async function runSend(ctx, contractId) {
 
     // Final state from the API.
     envelope = await avCall(ctx, "a consulta do contrato", (client) => client.getEnvelope(envelopeId));
-    const transitions = applyEnvelope(ctx, row.id, envelope, { initial: true });
-    row = db.get("SELECT * FROM contracts WHERE id = ?", [row.id]);
-    if (row.status === "sending") update(db, row.id, { status: "sent", sent_at: envelope.sent_at ?? now(), step: null, error: null });
-    row = getContractRow(db, row.id);
-    announceSent(ctx, row);
+    const transitions = await applyEnvelope(ctx, row.id, envelope, { initial: true });
+    row = await db.get("SELECT * FROM contracts WHERE id = ?", [row.id]);
+    if (row.status === "sending") await update(db, row.id, { status: "sent", sent_at: envelope.sent_at ?? now(), step: null, error: null });
+    row = await getContractRow(db, row.id);
+    await announceSent(ctx, row);
     // Resumed long after the fact: the envelope may already be finished.
     if (transitions.length) {
       if (row.status === "completed") await downloadFinalFiles(ctx, row).catch(() => {});
-      announceTransitions(ctx, getContractRow(db, row.id), transitions);
+      await announceTransitions(ctx, await getContractRow(db, row.id), transitions);
     }
-    return getContractRow(db, row.id);
+    return await getContractRow(db, row.id);
   } catch (err) {
     const message = err instanceof HttpError ? err.message : AV_MESSAGES.unavailable;
     if (!(err instanceof HttpError)) ctx.log?.error?.("[contracts] sending failed:", err);
-    db.tx(() => {
-      update(db, row.id, { status: "failed", error: message, attempts: (row.attempts ?? 0) + 1 });
-      logActivity(ctx, {
+    await db.tx(async () => {
+      await update(db, row.id, { status: "failed", error: message, attempts: (row.attempts ?? 0) + 1 });
+      await logActivity(ctx, {
         action: "contract.send_failed",
         entityType: "contract",
         entityId: row.id,
         clientId: row.client_id,
         brandId: row.brand_id,
         summary: `O envio do contrato ${code} para a AssinaVelox falhou: ${message}`,
-        data: { step: db.get("SELECT step FROM contracts WHERE id = ?", [row.id])?.step ?? null },
+        data: { step: (await db.get("SELECT step FROM contracts WHERE id = ?", [row.id]))?.step ?? null },
       });
       if (row.created_by)
-        notify(ctx, [row.created_by], {
+        await notify(ctx, [row.created_by], {
           type: "contract.failed",
           title: "O contrato não foi enviado",
           body: `${code}: ${message}`,
@@ -749,16 +753,16 @@ export async function runSend(ctx, contractId) {
           entityId: row.id,
         });
     });
-    return db.get("SELECT * FROM contracts WHERE id = ?", [row.id]);
+    return await db.get("SELECT * FROM contracts WHERE id = ?", [row.id]);
   }
 }
 
-export function retryContract(req, row) {
+export async function retryContract(req, row) {
   if (row.status !== "failed") throw conflict("Só contratos com falha no envio podem ser reenviados.");
   if (!isConfigured(req.ctx.config)) throw notConfigured(AV_MESSAGES.notConfigured);
-  req.ctx.db.tx(() => {
-    update(req.ctx.db, row.id, { status: "sending", error: null, step: "queued" });
-    logActivity(req, {
+  await req.ctx.db.tx(async () => {
+    await update(req.ctx.db, row.id, { status: "sending", error: null, step: "queued" });
+    await logActivity(req, {
       action: "contract.retry",
       entityType: "contract",
       entityId: row.id,
@@ -767,20 +771,20 @@ export function retryContract(req, row) {
     });
   });
   req.ctx.jobs?.enqueue("contracts.send", { contractId: row.id });
-  return getContractRow(req.ctx.db, row.id);
+  return await getContractRow(req.ctx.db, row.id);
 }
 
 function contractStaffLink(row) {
   return row.order_id ? `/admin/pedidos?pedido=${row.order_id}` : `/admin/pedidos?assinatura=${row.subscription_id}`;
 }
 
-function announceSent(ctx, row) {
+async function announceSent(ctx, row) {
   if (row.status !== "sent" || row.step === "announced") return;
   const { db } = ctx;
   const code = contractCode(row.id);
-  db.tx(() => {
-    update(db, row.id, { step: "announced" });
-    logActivity(ctx, {
+  await db.tx(async () => {
+    await update(db, row.id, { step: "announced" });
+    await logActivity(ctx, {
       action: "contract.sent",
       entityType: "contract",
       entityId: row.id,
@@ -789,7 +793,7 @@ function announceSent(ctx, row) {
       summary: `Contrato ${code} enviado para assinatura de ${row.client_signer_name}`,
       visibility: "client",
     });
-    notify(ctx, clientUserIds(db, row.client_id), {
+    await notify(ctx, await clientUserIds(db, row.client_id), {
       type: "contract.sent",
       title: "Contrato disponível para assinatura",
       body: `${row.title}. Assine pela área Financeiro da plataforma ou pelo e-mail da AssinaVelox enviado a ${row.client_signer_name}.`,
@@ -833,9 +837,9 @@ function mapStatus(envelopeStatus) {
  * ('client_signed', 'metta_signed', 'completed', 'refused', 'expired',
  * 'canceled') so the caller can notify once.
  */
-export function applyEnvelope(ctx, contractId, envelope, { initial = false } = {}) {
+export async function applyEnvelope(ctx, contractId, envelope, { initial = false } = {}) {
   const { db } = ctx;
-  const row = db.get("SELECT * FROM contracts WHERE id = ?", [contractId]);
+  const row = await db.get("SELECT * FROM contracts WHERE id = ?", [contractId]);
   if (!row) return [];
   const transitions = [];
   const fields = {
@@ -876,7 +880,7 @@ export function applyEnvelope(ctx, contractId, envelope, { initial = false } = {
       fields.error = null;
     }
   }
-  update(db, row.id, fields);
+  await update(db, row.id, fields);
   return transitions;
 }
 
@@ -898,39 +902,39 @@ async function downloadFinalFiles(ctx, row) {
       if (err?.avStatus !== 404) throw err;
     }
   }
-  if (Object.keys(updates).length) update(db, row.id, updates);
+  if (Object.keys(updates).length) await update(db, row.id, updates);
 }
 
 /** Reads the envelope from AssinaVelox and applies it (webhook, job, button). */
 export async function syncContract(ctx, contractId, { source = "sync" } = {}) {
   const { db } = ctx;
-  const row = db.get("SELECT * FROM contracts WHERE id = ?", [contractId]);
+  const row = await db.get("SELECT * FROM contracts WHERE id = ?", [contractId]);
   if (!row?.envelope_id) return row;
   if (row.status === "sending") return row; // the sending job owns it
   const envelope = await avCall(ctx, "a consulta do contrato", (client) => client.getEnvelope(row.envelope_id));
-  const transitions = applyEnvelope(ctx, row.id, envelope);
-  let current = getContractRow(db, row.id);
+  const transitions = await applyEnvelope(ctx, row.id, envelope);
+  let current = await getContractRow(db, row.id);
   if (current.status === "completed" && (!current.signed_key || !current.evidence_key)) {
     try {
       await downloadFinalFiles(ctx, current);
     } catch (err) {
       ctx.log?.warn?.(`[contracts] final files not downloaded yet (${source}): ${err.message}`);
     }
-    current = getContractRow(db, row.id);
+    current = await getContractRow(db, row.id);
   }
-  if (transitions.length) announceTransitions(ctx, current, transitions);
+  if (transitions.length) await announceTransitions(ctx, current, transitions);
   return current;
 }
 
-function announceTransitions(ctx, row, transitions) {
+async function announceTransitions(ctx, row, transitions) {
   const { db } = ctx;
   const code = contractCode(row.id);
-  const staff = [...new Set([...financeAndAdminIds(db), row.created_by].filter(Boolean))];
-  const mettaSignerId = userIdByEmail(db, row.metta_signer_email);
-  db.tx(() => {
+  const staff = [...new Set([...await financeAndAdminIds(db), row.created_by].filter(Boolean))];
+  const mettaSignerId = await userIdByEmail(db, row.metta_signer_email);
+  await db.tx(async () => {
     for (const transition of transitions) {
       if (transition === "client_signed") {
-        logActivity(ctx, {
+        await logActivity(ctx, {
           action: "contract.client_signed",
           entityType: "contract",
           entityId: row.id,
@@ -939,7 +943,7 @@ function announceTransitions(ctx, row, transitions) {
           summary: `${row.client_signer_name} registrou o aceite do contrato ${code}`,
           visibility: "client",
         });
-        notify(ctx, staff, {
+        await notify(ctx, staff, {
           type: "contract.client_signed",
           title: "Cliente assinou o contrato",
           body: `${row.client_signer_name} registrou o aceite do contrato ${code}. Falta a assinatura da Metta.`,
@@ -948,7 +952,7 @@ function announceTransitions(ctx, row, transitions) {
           entityId: row.id,
         });
         if (mettaSignerId)
-          notify(ctx, [mettaSignerId], {
+          await notify(ctx, [mettaSignerId], {
             type: "contract.your_turn",
             title: "Sua vez de assinar o contrato",
             body: `${row.client_signer_name} já assinou o contrato ${code}. Assine pelo painel ou pelo e-mail da AssinaVelox.`,
@@ -959,7 +963,7 @@ function announceTransitions(ctx, row, transitions) {
             actionLabel: "Assinar agora",
           });
       } else if (transition === "metta_signed") {
-        logActivity(ctx, {
+        await logActivity(ctx, {
           action: "contract.metta_signed",
           entityType: "contract",
           entityId: row.id,
@@ -969,7 +973,7 @@ function announceTransitions(ctx, row, transitions) {
           visibility: "client",
         });
       } else if (transition === "completed") {
-        logActivity(ctx, {
+        await logActivity(ctx, {
           action: "contract.completed",
           entityType: "contract",
           entityId: row.id,
@@ -978,8 +982,8 @@ function announceTransitions(ctx, row, transitions) {
           summary: `Contrato ${code} concluído: aceite das duas partes registrado`,
           visibility: "client",
         });
-        const gateLifted = contractSettings(db).requiredBeforePayment;
-        notify(ctx, clientUserIds(db, row.client_id), {
+        const gateLifted = (await contractSettings(db)).requiredBeforePayment;
+        await notify(ctx, await clientUserIds(db, row.client_id), {
           type: "contract.completed",
           title: "Contrato concluído",
           body: `O contrato ${code} foi assinado pelas duas partes. A cópia final e a página de evidências estão na área Financeiro.${gateLifted ? " O pagamento já está liberado." : ""}`,
@@ -989,7 +993,7 @@ function announceTransitions(ctx, row, transitions) {
           email: true,
           actionLabel: "Ver contrato",
         });
-        notify(ctx, staff, {
+        await notify(ctx, staff, {
           type: "contract.completed",
           title: "Contrato concluído",
           body: `${code} (${row.client_name ?? "cliente"}) foi assinado pelas duas partes.`,
@@ -1000,7 +1004,7 @@ function announceTransitions(ctx, row, transitions) {
       } else if (["refused", "expired", "canceled"].includes(transition)) {
         const label = { refused: "recusado", expired: "expirou", canceled: "foi cancelado" }[transition];
         const sentence = transition === "refused" ? `O contrato ${code} foi recusado` : `O contrato ${code} ${label}`;
-        logActivity(ctx, {
+        await logActivity(ctx, {
           action: `contract.${transition}`,
           entityType: "contract",
           entityId: row.id,
@@ -1009,7 +1013,7 @@ function announceTransitions(ctx, row, transitions) {
           summary: `${sentence}${transition === "refused" && row.refusal_reason ? `: ${row.refusal_reason}` : ""}`,
           visibility: "client",
         });
-        notify(ctx, staff, {
+        await notify(ctx, staff, {
           type: `contract.${transition}`,
           title: transition === "refused" ? "Contrato recusado" : transition === "expired" ? "Contrato expirou" : "Contrato cancelado",
           body: `${sentence}. Gere um novo contrato quando fizer sentido.`,
@@ -1041,11 +1045,11 @@ export async function cancelContract(req, row, reason) {
     }
     if (envelope) {
       if (["finalizing", "completed"].includes(envelope.status)) {
-        applyEnvelope(ctx, row.id, envelope);
+        await applyEnvelope(ctx, row.id, envelope);
         throw conflict("As duas partes já assinaram: o contrato está sendo concluído e não pode mais ser cancelado.");
       }
       if (["refused", "expired", "canceled"].includes(envelope.status)) {
-        applyEnvelope(ctx, row.id, envelope);
+        await applyEnvelope(ctx, row.id, envelope);
         throw conflict("Este contrato já foi encerrado na AssinaVelox. Atualize a página.");
       }
       if (envelope.status === "in_progress")
@@ -1056,9 +1060,9 @@ export async function cancelContract(req, row, reason) {
     }
   }
   const code = contractCode(row.id);
-  db.tx(() => {
-    update(db, row.id, { status: "canceled", canceled_at: now(), cancel_reason: reason || null, step: null });
-    logActivity(req, {
+  await db.tx(async () => {
+    await update(db, row.id, { status: "canceled", canceled_at: now(), cancel_reason: reason || null, step: null });
+    await logActivity(req, {
       action: "contract.canceled",
       entityType: "contract",
       entityId: row.id,
@@ -1068,7 +1072,7 @@ export async function cancelContract(req, row, reason) {
       visibility: row.status === "sent" ? "client" : "internal",
     });
     if (row.status === "sent")
-      notify(req, clientUserIds(db, row.client_id), {
+      await notify(req, await clientUserIds(db, row.client_id), {
         type: "contract.canceled",
         title: "Contrato cancelado",
         body: `O contrato ${code} foi cancelado pela Metta. Não é preciso assiná-lo.`,
@@ -1077,27 +1081,27 @@ export async function cancelContract(req, row, reason) {
         entityId: row.id,
       });
   });
-  return { row: getContractRow(db, row.id), warning };
+  return { row: await getContractRow(db, row.id), warning };
 }
 
-export function waiveContract(req, { orderId, subscriptionId }, reason) {
+export async function waiveContract(req, { orderId, subscriptionId }, reason) {
   const { db } = req.ctx;
   const table = orderId ? "orders" : "subscriptions";
   const id = orderId ?? subscriptionId;
-  const row = db.get(`SELECT * FROM ${table} WHERE id = ?`, [id]);
+  const row = await db.get(`SELECT * FROM ${table} WHERE id = ?`, [id]);
   if (!row) throw notFound();
-  const latest = latestContract(db, { orderId, subscriptionId });
+  const latest = await latestContract(db, { orderId, subscriptionId });
   if (latest && ["sending", "sent"].includes(latest.status))
     throw conflict("Cancele o contrato em andamento antes de dispensar a assinatura.");
-  db.tx(() => {
-    db.run(`UPDATE ${table} SET contract_waived_at = ?, contract_waived_by = ?, contract_waiver_reason = ?, updated_at = ? WHERE id = ?`, [
+  await db.tx(async () => {
+    await db.run(`UPDATE ${table} SET contract_waived_at = ?, contract_waived_by = ?, contract_waiver_reason = ?, updated_at = ? WHERE id = ?`, [
       now(),
       req.user.id,
       reason,
       now(),
       id,
     ]);
-    logActivity(req, {
+    await logActivity(req, {
       action: "contract.waived",
       entityType: orderId ? "order" : "subscription",
       entityId: id,
@@ -1107,18 +1111,18 @@ export function waiveContract(req, { orderId, subscriptionId }, reason) {
   });
 }
 
-export function unwaiveContract(req, { orderId, subscriptionId }) {
+export async function unwaiveContract(req, { orderId, subscriptionId }) {
   const { db } = req.ctx;
   const table = orderId ? "orders" : "subscriptions";
   const id = orderId ?? subscriptionId;
-  const row = db.get(`SELECT * FROM ${table} WHERE id = ?`, [id]);
+  const row = await db.get(`SELECT * FROM ${table} WHERE id = ?`, [id]);
   if (!row) throw notFound();
-  db.tx(() => {
-    db.run(`UPDATE ${table} SET contract_waived_at = NULL, contract_waived_by = NULL, contract_waiver_reason = NULL, updated_at = ? WHERE id = ?`, [
+  await db.tx(async () => {
+    await db.run(`UPDATE ${table} SET contract_waived_at = NULL, contract_waived_by = NULL, contract_waiver_reason = NULL, updated_at = ? WHERE id = ?`, [
       now(),
       id,
     ]);
-    logActivity(req, {
+    await logActivity(req, {
       action: "contract.waiver_removed",
       entityType: orderId ? "order" : "subscription",
       entityId: id,
@@ -1195,9 +1199,9 @@ export async function openSigningSession(req, row, role) {
     ...parseJson(row.embed_sessions, []).filter((s) => !previous.some((p) => p.id === s.id)),
     { id: session.id, role, createdAt: now() },
   ].slice(-10);
-  db.tx(() => {
-    update(db, row.id, { embed_sessions: JSON.stringify(sessions) });
-    logActivity(req, {
+  await db.tx(async () => {
+    await update(db, row.id, { embed_sessions: JSON.stringify(sessions) });
+    await logActivity(req, {
       action: "contract.signing_opened",
       entityType: "contract",
       entityId: row.id,

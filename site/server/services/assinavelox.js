@@ -107,15 +107,15 @@ export function isPublicHttps(url) {
   }
 }
 
-function storedWebhook(ctx) {
-  const value = getSetting(ctx.db, WEBHOOK_SETTING, null);
+async function storedWebhook(ctx) {
+  const value = await getSetting(ctx.db, WEBHOOK_SETTING, null);
   return value && typeof value === "object" ? value : null;
 }
 
-export function avStatus(ctx) {
+export async function avStatus(ctx) {
   const { config } = ctx;
   const settings = avSettings(config);
-  const stored = storedWebhook(ctx);
+  const stored = await storedWebhook(ctx);
   let apiHost = null;
   try {
     apiHost = settings.apiUrl ? new URL(settings.apiUrl).host : null;
@@ -244,11 +244,11 @@ export async function testConnection(ctx) {
 // ------------------------------------------------------------------ webhooks
 
 /** Secrets accepted for incoming deliveries (env + the stored subscription). */
-export function webhookSecrets(ctx) {
+export async function webhookSecrets(ctx) {
   const secrets = [];
   const { webhookSecret } = avSettings(ctx.config);
   if (webhookSecret) secrets.push(webhookSecret);
-  const stored = storedWebhook(ctx);
+  const stored = await storedWebhook(ctx);
   const opened = stored?.secret ? open(ctx.config.appSecret, SECRET_PURPOSE, stored.secret) : null;
   if (opened) secrets.push(opened);
   return secrets;
@@ -258,8 +258,8 @@ export function webhookSecrets(ctx) {
  * verifyWebhook(ctx, rawBody, headers) -> { valid, reason, event }
  * reason: secret_missing | invalid (bad signature or outside the 5 min window) | bad_json
  */
-export function verifyWebhook(ctx, rawBody, getHeader) {
-  const secrets = webhookSecrets(ctx);
+export async function verifyWebhook(ctx, rawBody, getHeader) {
+  const secrets = await webhookSecrets(ctx);
   if (!secrets.length) return { valid: false, reason: "secret_missing" };
   const signature = getHeader(webhooks.SIGNATURE_HEADER);
   const timestamp = getHeader(webhooks.TIMESTAMP_HEADER);
@@ -285,7 +285,7 @@ export async function connectWebhook(ctx, userId = null) {
     client.createWebhookSubscription({ target_url: targetUrl, events: WEBHOOK_EVENTS }),
   );
   const subscription = result.data;
-  const stored = storedWebhook(ctx);
+  const stored = await storedWebhook(ctx);
   // 200 without a secret means the subscription already existed for this token.
   const secret = subscription.secret
     ? seal(ctx.config.appSecret, SECRET_PURPOSE, subscription.secret)
@@ -306,12 +306,12 @@ export async function connectWebhook(ctx, userId = null) {
     secret,
     createdAt: subscription.created_at ?? now(),
   };
-  setSetting(ctx.db, WEBHOOK_SETTING, value, userId);
+  await setSetting(ctx.db, WEBHOOK_SETTING, value, userId);
   return value;
 }
 
 export async function disconnectWebhook(ctx, userId = null) {
-  const stored = storedWebhook(ctx);
+  const stored = await storedWebhook(ctx);
   if (!stored) return false;
   try {
     await avCall(ctx, "a remoção das notificações", (client) => client.deleteWebhookSubscription(stored.id));
@@ -319,6 +319,6 @@ export async function disconnectWebhook(ctx, userId = null) {
     // Already gone on the AssinaVelox side: forget it here too.
     if (err?.avStatus !== 404) throw err;
   }
-  setSetting(ctx.db, WEBHOOK_SETTING, null, userId);
+  await setSetting(ctx.db, WEBHOOK_SETTING, null, userId);
   return true;
 }

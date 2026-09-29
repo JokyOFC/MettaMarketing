@@ -16,7 +16,7 @@ const a = {};
 before(async () => {
   server = await startTestServer();
   ctx = server.ctx;
-  const { clientId, brandId } = createClientWithBrand(ctx, { name: "Cliente A" });
+  const { clientId, brandId } = await createClientWithBrand(ctx, { name: "Cliente A" });
   u.admin = await createUser(ctx, { role: "admin", name: "Admin" });
   u.manager = await createUser(ctx, { role: "manager" });
   u.designer = await createUser(ctx, { role: "designer" });
@@ -33,10 +33,11 @@ after(async () => {
 describe("notifications", () => {
   let mine;
   let theirs;
-  before(() => {
-    mine = [1, 2, 3].map((n) => notify(ctx, [u.client.id], { type: "test", title: `Aviso ${n}`, link: "/painel" })[0]);
-    theirs = notify(ctx, [u.other.id], { type: "test", title: "Aviso de outra pessoa" })[0];
-    ctx.db.run("UPDATE notifications SET read_at = ? WHERE id = ?", [now(), mine[0]]);
+  before(async () => {
+    mine = [];
+    for (const n of [1, 2, 3]) mine.push((await notify(ctx, [u.client.id], { type: "test", title: `Aviso ${n}`, link: "/painel" }))[0]);
+    theirs = (await notify(ctx, [u.other.id], { type: "test", title: "Aviso de outra pessoa" }))[0];
+    await ctx.db.run("UPDATE notifications SET read_at = ? WHERE id = ?", [now(), mine[0]]);
   });
 
   test("lists only the caller's rows, newest first, with unread totals", async () => {
@@ -60,7 +61,7 @@ describe("notifications", () => {
 
   test("marking someone else's notification answers 404", async () => {
     assert.equal((await a.client.post(`/api/notifications/${theirs}/read`)).status, 404);
-    assert.equal(ctx.db.get("SELECT read_at FROM notifications WHERE id = ?", [theirs]).read_at, null);
+    assert.equal((await ctx.db.get("SELECT read_at FROM notifications WHERE id = ?", [theirs])).read_at, null);
   });
 
   test("read one and read all touch only the caller's rows", async () => {
@@ -197,7 +198,7 @@ describe("settings", () => {
     assert.equal(res.status, 200);
     assert.deepEqual(res.body.settings, { orgName: "Metta", supportEmail: "contato@metta.test", zipRetentionHours: 48, defaultNotifyEmail: false });
     assert.deepEqual((await a.admin.get("/api/settings")).body.settings, res.body.settings);
-    const log = ctx.db.get("SELECT * FROM activity_log WHERE action = 'settings.updated' ORDER BY id DESC LIMIT 1");
+    const log = await ctx.db.get("SELECT * FROM activity_log WHERE action = 'settings.updated' ORDER BY id DESC LIMIT 1");
     assert.match(log.summary, /retenção dos ZIPs/);
     assert.equal(log.visibility, "internal");
   });
@@ -225,7 +226,7 @@ describe("settings", () => {
     const res0 = await createAgent(server).post("/api/auth/password/forgot", { email: u.designer.email });
     assert.equal(res0.status, 204);
     await ctx.mailer.idle();
-    const stored = ctx.db.get("SELECT * FROM email_outbox WHERE to_email = ? ORDER BY created_at DESC LIMIT 1", [u.designer.email]);
+    const stored = await ctx.db.get("SELECT * FROM email_outbox WHERE to_email = ? ORDER BY created_at DESC LIMIT 1", [u.designer.email]);
     const token = /redefinir-senha\/([A-Za-z0-9_-]+)/.exec(stored.text_body)[1];
 
     assert.equal((await a.manager.get("/api/settings/outbox")).status, 403);
@@ -281,7 +282,7 @@ describe("settings with integrations configured", () => {
     assert.equal(test1.body.status, "sent");
 
     const id = newId("eml");
-    configured.db.run(
+    await configured.db.run(
       `INSERT INTO email_outbox (id, to_email, subject, text_body, status, error, attempts, created_at)
        VALUES (?, 'pessoa@example.test', 'Assunto', 'Texto', 'failed', 'timeout', 1, ?)`,
       [id, now()],

@@ -4,6 +4,8 @@ Site institucional multipágina em React 19, Vite e React Router, e a plataforma
 
 ## Executar
 
+A plataforma usa MySQL 8.0.23 ou mais novo. Coloque `DATABASE_URL=mysql://usuario:senha@127.0.0.1:3306/metta` no `.env` (o usuário precisa poder criar os bancos `metta` e `metta_test_*`, usados pelos testes).
+
 ```sh
 npm install
 npm run dev        # site e interface (Vite, porta 5173)
@@ -35,7 +37,7 @@ Documentação: [docs/PLATFORM.md](./docs/PLATFORM.md) (arquitetura, papéis, au
 
 ### Configuração de produção
 
-Copie `.env.example` para `.env` e ajuste. Obrigatórios: `NODE_ENV=production`, `APP_URL` (endereço público, HTTPS) e `APP_SECRET`. `DATA_DIR` guarda o banco SQLite e os arquivos privados: faça backup dele. E-mail (SMTP) e Mercado Pago (`MP_ACCESS_TOKEN`, `MP_WEBHOOK_SECRET`) são opcionais; sem eles a interface informa "não configurado" e nada é simulado. O webhook do Mercado Pago deve apontar para `APP_URL/api/webhooks/mercadopago`.
+Copie `.env.example` para `.env` e ajuste. Obrigatórios: `NODE_ENV=production`, `APP_URL` (endereço público, HTTPS), `APP_SECRET` e `DATABASE_URL` (MySQL 8.0.23+, ex.: `mysql://metta:senha@127.0.0.1:3306/metta`; as tabelas são criadas na primeira subida). `DATA_DIR` guarda os arquivos privados: faça backup dele **e** do banco (`mysqldump --single-transaction`). E-mail (SMTP) e Mercado Pago (`MP_ACCESS_TOKEN`, `MP_WEBHOOK_SECRET`) são opcionais; sem eles a interface informa "não configurado" e nada é simulado. O webhook do Mercado Pago deve apontar para `APP_URL/api/webhooks/mercadopago`.
 
 Contratos: defina `ASSINAVELOX_API_URL` (produção: `https://app.assinavelox.com.br/api/v1`) e `ASSINAVELOX_TOKEN` (chave criada na AssinaVelox com as permissões listadas no `.env.example`). Na AssinaVelox, cadastre o endereço da plataforma (`APP_URL`) em API e integrações › Widget de assinatura. Depois, em Configurações › Contratos: conecte as notificações, defina quem assina pela Metta e o foro, e revise e salve os modelos de contrato — o primeiro envio só é liberado depois dessa revisão.
 

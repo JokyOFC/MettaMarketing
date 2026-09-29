@@ -1,5 +1,4 @@
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
 import express from "express";
 import { openDb } from "./db/connection.js";
 import { migrate } from "./db/migrate.js";
@@ -39,18 +38,17 @@ import webhooksRoutes from "./routes/webhooks.js";
 import zipsRoutes from "./routes/zips.js";
 
 /**
- * Opens (and migrates/seeds) the database and builds the shared context:
- * ctx = { config, db, storage, mailer, jobs, signer, log }.
+ * Connects to MySQL (creating the database when allowed), migrates, seeds and
+ * builds the shared context: ctx = { config, db, storage, mailer, jobs, signer, log }.
  * Pass { jobs: false } to skip the workers (scripts).
  */
-export function createContext(config, { jobs = true, log } = {}) {
+export async function createContext(config, { jobs = true, log } = {}) {
   const logger = log ?? createLogger(config.logLevel);
   mkdirSync(config.dataDir, { recursive: true });
-  if (config.dbFile !== ":memory:") mkdirSync(dirname(config.dbFile), { recursive: true });
-  const db = openDb(config.dbFile);
-  migrate(db);
-  seed(db);
-  pruneLoginAttempts(db);
+  const db = await openDb(config.databaseUrl, { poolSize: config.dbPoolSize });
+  await migrate(db);
+  await seed(db);
+  await pruneLoginAttempts(db);
   const ctx = {
     config,
     db,
@@ -60,7 +58,7 @@ export function createContext(config, { jobs = true, log } = {}) {
     jobs: null,
     log: logger,
   };
-  if (jobs) ctx.jobs = startJobs(ctx);
+  if (jobs) ctx.jobs = await startJobs(ctx);
   return ctx;
 }
 

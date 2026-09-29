@@ -22,8 +22,8 @@ const u = {};
 const f = {};
 const as = {};
 
-const setVariant = (id, variant, { primary = false, sort } = {}) =>
-  ctx.db.run("UPDATE materials SET variant = ?, is_primary = ?, sort_order = COALESCE(?, sort_order) WHERE id = ?", [
+const setVariant = async (id, variant, { primary = false, sort } = {}) =>
+  await ctx.db.run("UPDATE materials SET variant = ?, is_primary = ?, sort_order = COALESCE(?, sort_order) WHERE id = ?", [
     variant,
     primary ? 1 : 0,
     sort ?? null,
@@ -34,8 +34,8 @@ before(async () => {
   server = await startTestServer();
   ctx = server.ctx;
 
-  const a = createClientWithBrand(ctx, { name: "Cliente Aurora", brandName: "Aurora" });
-  const b = createClientWithBrand(ctx, { name: "Cliente Boreal", brandName: "Boreal" });
+  const a = await createClientWithBrand(ctx, { name: "Cliente Aurora", brandName: "Aurora" });
+  const b = await createClientWithBrand(ctx, { name: "Cliente Boreal", brandName: "Boreal" });
   f.clientA = a.clientId;
   f.brandA = a.brandId;
   f.clientB = b.clientId;
@@ -49,9 +49,9 @@ before(async () => {
   u.finance = await createUser(ctx, { role: "finance" });
   u.clientA = await createUser(ctx, { role: "client", clientId: f.clientA, name: "Carla Cliente" });
   u.clientB = await createUser(ctx, { role: "client", clientId: f.clientB });
-  addStaffAccess(ctx, u.manager.id, f.clientA);
-  addStaffAccess(ctx, u.managerOther.id, f.clientB);
-  f.project = createProject(ctx, { brandId: f.brandA, memberIds: [u.designer.id], includesEditables: true });
+  await addStaffAccess(ctx, u.manager.id, f.clientA);
+  await addStaffAccess(ctx, u.managerOther.id, f.clientB);
+  f.project = await createProject(ctx, { brandId: f.brandA, memberIds: [u.designer.id], includesEditables: true });
 
   const common = { brandId: f.brandA, projectId: f.project.id, createdBy: u.designer.id };
   f.logoMain = await insertMaterial(ctx, {
@@ -70,11 +70,11 @@ before(async () => {
   f.logoDraft = await insertMaterial(ctx, { ...common, title: "Símbolo rascunho" });
   f.logoArchived = await insertMaterial(ctx, { ...common, title: "Logo antiga", visibility: "released", archived: true });
   f.logoLoose = await insertMaterial(ctx, { ...common, title: "Assinatura sem variante", visibility: "released" });
-  setVariant(f.logoMain.material.id, "principal", { primary: true, sort: 50 });
-  setVariant(f.logoAlt.material.id, "principal", { sort: 10 });
-  setVariant(f.logoDraft.material.id, "simbolo");
-  setVariant(f.logoArchived.material.id, "escura");
-  ctx.db.run("UPDATE materials SET internal_notes = 'nota secreta da equipe' WHERE id = ?", [f.logoMain.material.id]);
+  await setVariant(f.logoMain.material.id, "principal", { primary: true, sort: 50 });
+  await setVariant(f.logoAlt.material.id, "principal", { sort: 10 });
+  await setVariant(f.logoDraft.material.id, "simbolo");
+  await setVariant(f.logoArchived.material.id, "escura");
+  await ctx.db.run("UPDATE materials SET internal_notes = 'nota secreta da equipe' WHERE id = ?", [f.logoMain.material.id]);
 
   f.manual = await insertMaterial(ctx, {
     ...common,
@@ -148,11 +148,11 @@ describe("GET /api/brands/:id/library", () => {
   });
 
   test("clients only see released content and never internal fields", async () => {
-    ctx.db.run(
+    await ctx.db.run(
       `INSERT INTO brand_colors (id, brand_id, name, hex, sort_order, visibility, created_at, updated_at)
-       VALUES ('col_testReleased0001', ?, 'Oliva', '#202619', 10, 'released', datetime('now'), datetime('now')),
-              ('col_testDraft0000001', ?, 'Rascunho', '#FF0000', 20, 'draft', datetime('now'), datetime('now'))`,
-      [f.brandA, f.brandA],
+       VALUES ('col_testReleased0001', ?, 'Oliva', '#202619', 10, 'released', ?, ?),
+              ('col_testDraft0000001', ?, 'Rascunho', '#FF0000', 20, 'draft', ?, ?)`,
+      [f.brandA, new Date().toISOString(), new Date().toISOString(), f.brandA, new Date().toISOString(), new Date().toISOString()],
     );
     const res = await as.clientA.get(`/api/brands/${f.brandA}/library`);
     assert.equal(res.status, 200);
@@ -169,7 +169,7 @@ describe("GET /api/brands/:id/library", () => {
     const raw = JSON.stringify(body);
     assert.ok(!raw.includes("storage"), "storage keys never leave the server");
     assert.ok(!raw.includes("nota secreta"));
-    ctx.db.run("DELETE FROM brand_colors WHERE brand_id = ?", [f.brandA]);
+    await ctx.db.run("DELETE FROM brand_colors WHERE brand_id = ?", [f.brandA]);
   });
 
   test("isolation: other client, out-of-scope staff and finance", async () => {
@@ -274,7 +274,7 @@ describe("fonts and licence", () => {
     assert.equal(res.body.font.weights, "400, 500");
     assert.equal(res.body.font.files.length, 2, "staff see the linked files");
     // a draft font never makes files downloadable: the licence reaches the client with the release
-    const flags = ctx.db.all("SELECT font_distributable FROM material_files WHERE material_id = ?", [f.fontFiles.material.id]);
+    const flags = await ctx.db.all("SELECT font_distributable FROM material_files WHERE material_id = ?", [f.fontFiles.material.id]);
     assert.ok(flags.every((row) => row.font_distributable === 0));
     const link = await as.clientA.post("/api/downloads/link", { fileId: f.fontFiles.files[0].id });
     assert.equal(link.status, 403);
@@ -285,7 +285,7 @@ describe("fonts and licence", () => {
     const release = await as.manager.post(`/api/brands/${f.brandA}/identity/release`, { colorIds: [], fontIds: [fontId], notify: false });
     assert.equal(release.status, 200);
     assert.equal(release.body.released.fonts, 1);
-    const released = ctx.db.all("SELECT font_distributable FROM material_files WHERE material_id = ?", [f.fontFiles.material.id]);
+    const released = await ctx.db.all("SELECT font_distributable FROM material_files WHERE material_id = ?", [f.fontFiles.material.id]);
     assert.ok(released.every((row) => row.font_distributable === 1), "released + allowed: distributable");
     assert.equal((await as.clientA.post("/api/downloads/link", { fileId: f.fontFiles.files[0].id })).status, 200);
 
@@ -300,7 +300,7 @@ describe("fonts and licence", () => {
 
     const change = await as.manager.patch(`/api/fonts/${fontId}`, { distribution: "reference_only" });
     assert.equal(change.status, 200);
-    const flags = ctx.db.all("SELECT font_distributable FROM material_files WHERE material_id = ?", [f.fontFiles.material.id]);
+    const flags = await ctx.db.all("SELECT font_distributable FROM material_files WHERE material_id = ?", [f.fontFiles.material.id]);
     assert.ok(flags.every((row) => row.font_distributable === 0));
 
     lib = await as.clientA.get(`/api/brands/${f.brandA}/library`);
@@ -332,15 +332,15 @@ describe("fonts and licence", () => {
     assert.equal(await clientLink(), "font_license", "draft licence does not reach the client");
 
     // new files attached to that material follow the released licence too (trigger, migration 010)
-    ctx.db.run(
+    await ctx.db.run(
       `INSERT INTO material_files (id, version_id, material_id, role, position, original_name, display_name, ext, mime, size_bytes,
          sha256, storage_key, media_kind, preview_status, font_distributable, created_at)
        SELECT 'fil_triggerCheck0001', version_id, material_id, role, 9, 'Nova.ttf', 'Nova.ttf', ext, mime, size_bytes, sha256,
          storage_key, media_kind, preview_status, 1, created_at FROM material_files WHERE id = ?`,
       [licensedFile],
     );
-    assert.equal(ctx.db.get("SELECT font_distributable FROM material_files WHERE id = 'fil_triggerCheck0001'").font_distributable, 0);
-    ctx.db.run("DELETE FROM material_files WHERE id = 'fil_triggerCheck0001'");
+    assert.equal((await ctx.db.get("SELECT font_distributable FROM material_files WHERE id = 'fil_triggerCheck0001'")).font_distributable, 0);
+    await ctx.db.run("DELETE FROM material_files WHERE id = 'fil_triggerCheck0001'");
 
     // (b) re-linking a released "allowed" font to the licensed material needs a manager
     const open = await as.manager.post(`/api/brands/${f.brandA}/fonts`, {
@@ -360,7 +360,7 @@ describe("fonts and licence", () => {
     assert.equal(relink.status, 403);
     assert.match(relink.body.error.message, /Peça a um gestor/);
     assert.equal(await clientLink(), "font_license");
-    assert.equal(ctx.db.get("SELECT material_id FROM brand_fonts WHERE id = ?", [open.body.font.id]).material_id, f.fontFiles.material.id);
+    assert.equal((await ctx.db.get("SELECT material_id FROM brand_fonts WHERE id = ?", [open.body.font.id])).material_id, f.fontFiles.material.id);
 
     // releasing the draft "allowed" font (manager, with the summary) is what opens the download
     const draftRelease = await as.manager.post(`/api/brands/${f.brandA}/identity/release`, {
@@ -412,7 +412,7 @@ describe("fonts and licence", () => {
   test("deleting the font clears the licence flag", async () => {
     await as.manager.patch(`/api/fonts/${fontId}`, { distribution: "allowed" });
     assert.equal((await as.manager.del(`/api/fonts/${fontId}`)).status, 204);
-    const flags = ctx.db.all("SELECT font_distributable FROM material_files WHERE material_id = ?", [f.fontFiles.material.id]);
+    const flags = await ctx.db.all("SELECT font_distributable FROM material_files WHERE material_id = ?", [f.fontFiles.material.id]);
     assert.ok(flags.every((row) => row.font_distributable === 0));
   });
 });
@@ -429,15 +429,15 @@ describe("identity release and guidelines", () => {
     assert.ok(res.body.colors.every((c) => c.visibility === "released"));
     assert.equal(res.body.recipients, 1);
 
-    const notification = ctx.db.get("SELECT * FROM notifications WHERE user_id = ? AND type = 'identity_released'", [u.clientA.id]);
+    const notification = await ctx.db.get("SELECT * FROM notifications WHERE user_id = ? AND type = 'identity_released'", [u.clientA.id]);
     assert.ok(notification);
     assert.equal(notification.link, "/painel/marca");
-    const activity = ctx.db.get(
+    const activity = await ctx.db.get(
       "SELECT * FROM activity_log WHERE action = 'brand.identity_released' ORDER BY id DESC LIMIT 1",
     );
     assert.equal(activity.visibility, "client");
     assert.equal(activity.client_id, f.clientA);
-    assert.equal(ctx.db.get("SELECT COUNT(*) AS n FROM notifications WHERE user_id = ?", [u.clientB.id]).n, 0);
+    assert.equal((await ctx.db.get("SELECT COUNT(*) AS n FROM notifications WHERE user_id = ?", [u.clientB.id])).n, 0);
 
     const again = await as.manager.post(`/api/brands/${f.brandA}/identity/release`, {});
     assert.equal(again.status, 422, "nothing new to release");
@@ -447,7 +447,7 @@ describe("identity release and guidelines", () => {
   });
 
   test("released colours: designers cannot change what the client sees", async () => {
-    const color = ctx.db.get("SELECT * FROM brand_colors WHERE brand_id = ? AND visibility = 'released' ORDER BY sort_order LIMIT 1", [f.brandA]);
+    const color = await ctx.db.get("SELECT * FROM brand_colors WHERE brand_id = ? AND visibility = 'released' ORDER BY sort_order LIMIT 1", [f.brandA]);
     for (const body of [{ hex: "#FF0000" }, { name: "Vermelho" }, { usage: "Qualquer uso" }, { pantone: "Pantone 185 C" }]) {
       const res = await as.designer.patch(`/api/colors/${color.id}`, body);
       assert.equal(res.status, 403, JSON.stringify(body));
@@ -465,7 +465,7 @@ describe("identity release and guidelines", () => {
   });
 
   test("released colours can only be hidden or removed by release-capable staff", async () => {
-    const color = ctx.db.get("SELECT id FROM brand_colors WHERE brand_id = ? AND visibility = 'released' LIMIT 1", [f.brandA]);
+    const color = await ctx.db.get("SELECT id FROM brand_colors WHERE brand_id = ? AND visibility = 'released' LIMIT 1", [f.brandA]);
     assert.equal((await as.designer.del(`/api/colors/${color.id}`)).status, 403);
     const hide = await as.manager.patch(`/api/colors/${color.id}`, { visibility: "draft" });
     assert.equal(hide.status, 200);
@@ -509,7 +509,7 @@ describe("identity release and guidelines", () => {
     lib = await as.clientA.get(`/api/brands/${f.brandA}/library`);
     assert.equal(lib.body.brand.usageGuidelines, "TEXTO NÃO REVISADO");
     assert.equal(lib.body.brand.typographyGuidelines, "Títulos em Raleway 300.");
-    const logged = ctx.db.get("SELECT * FROM activity_log WHERE action = 'brand.identity_released' ORDER BY rowid DESC LIMIT 1");
+    const logged = await ctx.db.get("SELECT * FROM activity_log WHERE action = 'brand.identity_released' ORDER BY id DESC LIMIT 1");
     assert.match(logged.summary, /orientações de uso e de tipografia/);
 
     // nothing new: guidelines do not count again

@@ -63,7 +63,7 @@ function serveSite(app, config) {
 }
 
 const config = loadConfig();
-const ctx = createContext(config);
+const ctx = await createContext(config);
 const log = ctx.log;
 
 if (!process.env.APP_URL && config.isProduction)
@@ -94,7 +94,7 @@ async function shutdown(signal) {
   } catch (err) {
     log.error("Error while stopping jobs:", err);
   }
-  ctx.db.close();
+  await ctx.db.close();
   clearTimeout(force);
   process.exit(0);
 }

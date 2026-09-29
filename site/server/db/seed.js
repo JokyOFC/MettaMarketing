@@ -20,29 +20,28 @@ export const SYSTEM_CATEGORIES = [
 
 const priceCents = (price) => Math.round(Number(String(price).replace(/\./g, "").replace(",", ".")) * 100);
 
-export function seed(db) {
+export async function seed(db) {
   const at = now();
-  db.tx(() => {
-    SYSTEM_CATEGORIES.forEach((category, index) => {
-      db.run(
-        `INSERT INTO categories (id, slug, name, area, folder, sort_order, is_system, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
-         ON CONFLICT(slug) DO NOTHING`,
+  await db.tx(async () => {
+    for (const [index, category] of SYSTEM_CATEGORIES.entries()) {
+      await db.run(
+        `INSERT IGNORE INTO categories (id, slug, name, area, folder, sort_order, is_system, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
         [newId("cat"), category.slug, category.name, category.area, category.folder, (index + 1) * 10, at, at],
       );
-    });
+    }
 
-    const services = db.get("SELECT COUNT(*) AS n FROM services").n;
+    const services = (await db.get("SELECT COUNT(*) AS n FROM services")).n;
     if (services === 0) {
-      plans.forEach((plan, index) => {
-        db.run(
+      for (const [index, plan] of plans.entries()) {
+        await db.run(
           `INSERT INTO services (id, name, kind, price_cents, billing_interval, description, items,
              includes_editables, active, sort_order, created_at, updated_at)
            VALUES (?, ?, 'subscription', ?, 'monthly', ?, ?, 0, 1, ?, ?, ?)`,
           [newId("svc"), plan.name, priceCents(plan.price), plan.description, JSON.stringify(plan.items), (index + 1) * 10, at, at],
         );
-      });
-      db.run(
+      }
+      await db.run(
         `INSERT INTO services (id, name, kind, price_cents, billing_interval, description, items,
            includes_editables, active, sort_order, created_at, updated_at)
          VALUES (?, 'Identidade visual', 'one_off', 200000, NULL, NULL, '[]', 0, 1, ?, ?, ?)`,
@@ -57,7 +56,7 @@ export function seed(db) {
       zipRetentionHours: 24,
     };
     for (const [key, value] of Object.entries(defaults)) {
-      db.run("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING", [
+      await db.run("INSERT IGNORE INTO settings (name, value, updated_at) VALUES (?, ?, ?)", [
         key,
         JSON.stringify(value),
         at,

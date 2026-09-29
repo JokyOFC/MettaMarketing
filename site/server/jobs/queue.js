@@ -67,9 +67,14 @@ export function createJobs(ctx) {
         return Promise.resolve(undefined);
       }
       return new Promise((resolve) => {
-        queue.items.push({ payload, resolve });
-        // start on the next tick so the caller's transaction has committed
-        queueMicrotask(() => pump(queue));
+        const start = () => {
+          queue.items.push({ payload, resolve });
+          queueMicrotask(() => pump(queue));
+        };
+        // Inside a transaction the job starts after the commit, outside the
+        // transaction (never when it rolls back).
+        if (ctx?.db?.inTransaction?.()) ctx.db.afterCommit(start);
+        else start();
       });
     },
     has(name) {

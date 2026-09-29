@@ -122,22 +122,22 @@ export default function contractsRoutes(ctx) {
 
   // Staff: contract in scope (404 otherwise). Clients: only their own, and
   // only once it has been sent to them.
-  function assertContract(req, id) {
-    const row = getContractRow(db, id);
+  async function assertContract(req, id) {
+    const row = await getContractRow(db, id);
     if (!row) throw notFound("Não encontramos este contrato.");
     if (isStaff(req)) {
       if (!can(req.user, "orders.view")) throw notFound("Não encontramos este contrato.");
-      assertClient(req, row.client_id);
+      await assertClient(req, row.client_id);
     } else if (row.client_id !== req.user.client_id || ["draft", "sending", "failed"].includes(row.status)) {
       throw notFound("Não encontramos este contrato.");
     }
     return row;
   }
 
-  function detail(req, row) {
+  async function detail(req, row) {
     const staff = isStaff(req);
-    const timeline = db
-      .all(`${ACTIVITY_SELECT} WHERE a.entity_type = 'contract' AND a.entity_id = ? ORDER BY a.id ASC`, [row.id])
+    const timeline = (await db
+      .all(`${ACTIVITY_SELECT} WHERE a.entity_type = 'contract' AND a.entity_id = ? ORDER BY a.id ASC`, [row.id]))
       .filter((a) => staff || a.visibility === "client")
       .map((a) => ({
         id: a.id,
@@ -151,13 +151,15 @@ export default function contractsRoutes(ctx) {
 
   // --------------------------------------------------------------- integration status (staff)
 
-  router.get("/api/contracts/status", requireAuth, requireCap("orders.view", "settings.manage"), (req, res) => {
-    const settings = contractSettings(db);
-    const templates = KINDS.map((kind) => {
-      const t = currentTemplate(db, kind);
-      return { kind, version: t.version, reviewed: Boolean(t.created_by) };
-    });
-    const status = avStatus(ctx);
+  router.get("/api/contracts/status", requireAuth, requireCap("orders.view", "settings.manage"), async (req, res) => {
+    const settings = await contractSettings(db);
+    const templates = await Promise.all(
+      KINDS.map(async (kind) => {
+        const t = await currentTemplate(db, kind);
+        return { kind, version: t.version, reviewed: Boolean(t.created_by) };
+      }),
+    );
+    const status = await avStatus(ctx);
     const issues = [...settingsIssues(settings)];
     if (!status.configured) issues.unshift(AV_MESSAGES.notConfigured);
     for (const t of templates)
@@ -176,27 +178,27 @@ export default function contractsRoutes(ctx) {
 
   // --------------------------------------------------------------- settings & templates (admin)
 
-  router.get("/api/contracts/settings", requireAuth, requireCap("settings.manage"), (req, res) => {
-    const settings = contractSettings(db);
+  router.get("/api/contracts/settings", requireAuth, requireCap("settings.manage"), async (req, res) => {
+    const settings = await contractSettings(db);
     res.json({
       settings,
       issues: settingsIssues(settings),
-      integration: avStatus(ctx),
-      templates: KINDS.map((kind) => serializeTemplate(currentTemplate(db, kind))),
+      integration: await avStatus(ctx),
+      templates: await Promise.all(KINDS.map(async (kind) => serializeTemplate(await currentTemplate(db, kind)))),
       variables: VARIABLES,
     });
   });
 
-  router.patch("/api/contracts/settings", requireAuth, requireCap("settings.manage"), (req, res) => {
+  router.patch("/api/contracts/settings", requireAuth, requireCap("settings.manage"), async (req, res) => {
     const patch = parse(settingsSchema, req.body ?? {});
-    const settings = saveContractSettings(req, patch);
+    const settings = await saveContractSettings(req, patch);
     res.json({ settings, issues: settingsIssues(settings) });
   });
 
-  router.put("/api/contracts/templates/:kind", requireAuth, requireCap("settings.manage"), (req, res) => {
+  router.put("/api/contracts/templates/:kind", requireAuth, requireCap("settings.manage"), async (req, res) => {
     if (!KINDS.includes(req.params.kind)) throw notFound("Modelo de contrato não encontrado.");
     const input = parse(templateSchema, req.body ?? {});
-    const row = saveTemplate(req, req.params.kind, input);
+    const row = await saveTemplate(req, req.params.kind, input);
     res.json({ template: serializeTemplate(row) });
   });
 
@@ -205,7 +207,7 @@ export default function contractsRoutes(ctx) {
     const kind = req.params.kind;
     if (!KINDS.includes(kind)) throw notFound("Modelo de contrato não encontrado.");
     const input = parse(templatePreviewSchema, req.body ?? {});
-    const current = currentTemplate(db, kind);
+    const current = await currentTemplate(db, kind);
     const bytes = await renderTemplateExample(db, kind, {
       ...current,
       title: input.title ?? current.title,
@@ -220,17 +222,17 @@ export default function contractsRoutes(ctx) {
 
   router.post("/api/contracts/integration/webhook", requireAuth, requireCap("settings.manage"), async (req, res) => {
     await connectWebhook(ctx, req.user.id);
-    res.json({ integration: avStatus(ctx) });
+    res.json({ integration: await avStatus(ctx) });
   });
 
   router.delete("/api/contracts/integration/webhook", requireAuth, requireCap("settings.manage"), async (req, res) => {
     await disconnectWebhook(ctx, req.user.id);
-    res.json({ integration: avStatus(ctx) });
+    res.json({ integration: await avStatus(ctx) });
   });
 
   // --------------------------------------------------------------- staff: list, preview, create
 
-  router.get("/api/contracts", requireAuth, requireCap("orders.view"), (req, res) => {
+  router.get("/api/contracts", requireAuth, requireCap("orders.view"), async (req, res) => {
     const scope = scopeSql.clients(req, "c");
     const where = [scope.sql];
     const params = [...scope.params];
@@ -251,8 +253,8 @@ export default function contractsRoutes(ctx) {
     } else if (status === "open") where.push("ct.status IN ('sending', 'sent', 'failed')");
     const { limit, offset, page, pageSize } = paginate(req.query);
     const sql = `${CONTRACT_SELECT} WHERE ${where.join(" AND ")}`;
-    const total = db.get(`SELECT COUNT(*) AS n FROM (${sql})`, params).n;
-    const rows = db.all(`${sql} ORDER BY ct.created_at DESC, ct.id LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    const total = (await db.get(`SELECT COUNT(*) AS n FROM (${sql}) AS counted`, params)).n;
+    const rows = await db.all(`${sql} ORDER BY ct.created_at DESC, ct.id LIMIT ? OFFSET ?`, [...params, limit, offset]);
     res.json({ items: rows.map((row) => serializeContract(req, row)), total, page, pageSize });
   });
 
@@ -261,10 +263,10 @@ export default function contractsRoutes(ctx) {
   router.post("/api/contracts/preview", requireAuth, requireCap("orders.manage"), async (req, res) => {
     const input = parse(createSchema, req.body ?? {});
     const row = input.orderId
-      ? db.get("SELECT client_id FROM orders WHERE id = ?", [input.orderId])
-      : db.get("SELECT client_id FROM subscriptions WHERE id = ?", [input.subscriptionId]);
+      ? await db.get("SELECT client_id FROM orders WHERE id = ?", [input.orderId])
+      : await db.get("SELECT client_id FROM subscriptions WHERE id = ?", [input.subscriptionId]);
     if (!row) throw notFound();
-    assertClient(req, row.client_id);
+    await assertClient(req, row.client_id);
     const bytes = await previewContract(req, input);
     sendPdf(res, bytes, "contrato-pre-visualizacao.pdf");
   });
@@ -272,72 +274,72 @@ export default function contractsRoutes(ctx) {
   router.post("/api/contracts", requireAuth, requireCap("orders.manage"), async (req, res) => {
     const input = parse(createSchema, req.body ?? {});
     const source = input.orderId
-      ? db.get("SELECT client_id FROM orders WHERE id = ?", [input.orderId])
-      : db.get("SELECT client_id FROM subscriptions WHERE id = ?", [input.subscriptionId]);
+      ? await db.get("SELECT client_id FROM orders WHERE id = ?", [input.orderId])
+      : await db.get("SELECT client_id FROM subscriptions WHERE id = ?", [input.subscriptionId]);
     if (!source) throw notFound();
-    assertClient(req, source.client_id);
+    await assertClient(req, source.client_id);
     const row = await createContract(req, input);
-    res.status(202).json({ contract: detail(req, row) });
+    res.status(202).json({ contract: await detail(req, row) });
   });
 
-  router.post("/api/contracts/waive", requireAuth, requireCap("orders.manage"), (req, res) => {
+  router.post("/api/contracts/waive", requireAuth, requireCap("orders.manage"), async (req, res) => {
     const input = parse(waiveSchema, req.body ?? {});
     const row = input.orderId
-      ? db.get("SELECT client_id FROM orders WHERE id = ?", [input.orderId])
-      : db.get("SELECT client_id FROM subscriptions WHERE id = ?", [input.subscriptionId]);
+      ? await db.get("SELECT client_id FROM orders WHERE id = ?", [input.orderId])
+      : await db.get("SELECT client_id FROM subscriptions WHERE id = ?", [input.subscriptionId]);
     if (!row) throw notFound();
-    assertClient(req, row.client_id);
-    waiveContract(req, input, input.reason);
+    await assertClient(req, row.client_id);
+    await waiveContract(req, input, input.reason);
     res.json({ waived: true });
   });
 
-  router.post("/api/contracts/unwaive", requireAuth, requireCap("orders.manage"), (req, res) => {
+  router.post("/api/contracts/unwaive", requireAuth, requireCap("orders.manage"), async (req, res) => {
     const input = parse(sourceSchema, req.body ?? {});
     const row = input.orderId
-      ? db.get("SELECT client_id FROM orders WHERE id = ?", [input.orderId])
-      : db.get("SELECT client_id FROM subscriptions WHERE id = ?", [input.subscriptionId]);
+      ? await db.get("SELECT client_id FROM orders WHERE id = ?", [input.orderId])
+      : await db.get("SELECT client_id FROM subscriptions WHERE id = ?", [input.subscriptionId]);
     if (!row) throw notFound();
-    assertClient(req, row.client_id);
-    unwaiveContract(req, input);
+    await assertClient(req, row.client_id);
+    await unwaiveContract(req, input);
     res.json({ waived: false });
   });
 
-  router.get("/api/contracts/:id", requireAuth, requireCap("orders.view"), (req, res) => {
-    res.json({ contract: detail(req, assertContract(req, req.params.id)) });
+  router.get("/api/contracts/:id", requireAuth, requireCap("orders.view"), async (req, res) => {
+    res.json({ contract: await detail(req, await assertContract(req, req.params.id)) });
   });
 
-  router.post("/api/contracts/:id/retry", requireAuth, requireCap("orders.manage"), (req, res) => {
-    const row = assertContract(req, req.params.id);
-    res.status(202).json({ contract: detail(req, retryContract(req, row)) });
+  router.post("/api/contracts/:id/retry", requireAuth, requireCap("orders.manage"), async (req, res) => {
+    const row = await assertContract(req, req.params.id);
+    res.status(202).json({ contract: await detail(req, await retryContract(req, row)) });
   });
 
   router.post("/api/contracts/:id/sync", requireAuth, requireCap("orders.manage"), async (req, res) => {
-    const row = assertContract(req, req.params.id);
+    const row = await assertContract(req, req.params.id);
     if (!row.envelope_id) throw conflict("Este contrato ainda não chegou à AssinaVelox.");
     await syncContract(ctx, row.id, { source: "button" });
-    res.json({ contract: detail(req, getContractRow(db, row.id)) });
+    res.json({ contract: await detail(req, await getContractRow(db, row.id)) });
   });
 
   router.post("/api/contracts/:id/cancel", requireAuth, requireCap("orders.manage"), async (req, res) => {
-    const row = assertContract(req, req.params.id);
+    const row = await assertContract(req, req.params.id);
     const { reason } = parse(cancelSchema, req.body ?? {});
     const result = await cancelContract(req, row, reason);
-    res.json({ contract: detail(req, result.row), warning: result.warning });
+    res.json({ contract: await detail(req, result.row), warning: result.warning });
   });
 
   // The Metta representative signs from the admin panel.
   router.post("/api/contracts/:id/sign-session", requireAuth, requireCap("orders.view"), async (req, res) => {
-    const row = assertContract(req, req.params.id);
+    const row = await assertContract(req, req.params.id);
     res.json(await openThrottled(req, row, "metta"));
   });
 
   // Files: staff in scope, or the client that owns the contract.
   router.get("/api/contracts/:id/files/:kind", requireAuth, async (req, res) => {
-    const row = getContractRow(db, req.params.id);
+    const row = await getContractRow(db, req.params.id);
     if (!row) throw notFound("Não encontramos este contrato.");
     if (isStaff(req)) {
       if (!can(req.user, "orders.view")) throw notFound("Não encontramos este contrato.");
-      assertClient(req, row.client_id);
+      await assertClient(req, row.client_id);
     } else if (!can(req.user, "portal.access") || row.client_id !== req.user.client_id || ["draft", "sending", "failed"].includes(row.status)) {
       throw notFound("Não encontramos este contrato.");
     }
@@ -355,8 +357,8 @@ export default function contractsRoutes(ctx) {
 
   // --------------------------------------------------------------- client portal
 
-  router.get("/api/portal/contracts", requireAuth, requireCap("portal.access"), (req, res) => {
-    const rows = db.all(
+  router.get("/api/portal/contracts", requireAuth, requireCap("portal.access"), async (req, res) => {
+    const rows = await db.all(
       `${CONTRACT_SELECT} WHERE ct.client_id = ? AND ct.status NOT IN ('draft', 'sending', 'failed')
         ORDER BY CASE WHEN ct.status = 'sent' THEN 0 ELSE 1 END, ct.created_at DESC`,
       [req.user.client_id],
@@ -364,19 +366,19 @@ export default function contractsRoutes(ctx) {
     res.json({ items: rows.map((row) => serializeContract(req, row)) });
   });
 
-  router.get("/api/portal/contracts/:id", requireAuth, requireCap("portal.access"), (req, res) => {
-    res.json({ contract: detail(req, assertContract(req, req.params.id)) });
+  router.get("/api/portal/contracts/:id", requireAuth, requireCap("portal.access"), async (req, res) => {
+    res.json({ contract: await detail(req, await assertContract(req, req.params.id)) });
   });
 
   router.post("/api/portal/contracts/:id/sign-session", requireAuth, requireCap("portal.access"), async (req, res) => {
-    const row = assertContract(req, req.params.id);
+    const row = await assertContract(req, req.params.id);
     res.json(await openThrottled(req, row, "client"));
   });
 
   // After the widget reports completion: read the envelope again (throttled).
   const lastRefresh = new Map();
   router.post("/api/portal/contracts/:id/refresh", requireAuth, requireCap("portal.access"), async (req, res) => {
-    const row = assertContract(req, req.params.id);
+    const row = await assertContract(req, req.params.id);
     const last = lastRefresh.get(row.id) ?? 0;
     if (Date.now() - last < 3000) throw rateLimited("Aguarde alguns segundos para atualizar de novo.");
     lastRefresh.set(row.id, Date.now());
@@ -387,7 +389,7 @@ export default function contractsRoutes(ctx) {
       if (err?.code === "integration_not_configured") throw forbidden(AV_MESSAGES.clientNotConfigured, "integration_not_configured");
       throw err;
     }
-    res.json({ contract: detail(req, getContractRow(db, row.id)) });
+    res.json({ contract: await detail(req, await getContractRow(db, row.id)) });
   });
 
   return router;

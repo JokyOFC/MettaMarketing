@@ -33,22 +33,22 @@ if (config.isProduction) {
   console.error("seed:dev não roda com NODE_ENV=production.");
   process.exit(1);
 }
-const ctx = createContext(config, { jobs: false });
+const ctx = await createContext(config, { jobs: false });
 const { db, storage } = ctx;
 const at = now();
 const created = [];
 
 async function ensureUser({ role, email, name, password, jobTitle = null, clientId = null }) {
-  const existing = db.get("SELECT * FROM users WHERE email = ?", [email]);
+  const existing = await db.get("SELECT * FROM users WHERE email = ?", [email]);
   if (existing) return existing;
   const id = newId("usr");
-  db.run(
+  await db.run(
     `INSERT INTO users (id, email, name, role, client_id, password_hash, status, job_title, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
     [id, email, name, role, clientId, await hashPassword(password), jobTitle, at, at],
   );
   created.push(email);
-  return db.get("SELECT * FROM users WHERE id = ?", [id]);
+  return await db.get("SELECT * FROM users WHERE id = ?", [id]);
 }
 
 // Simple example mark generated here (not a real client's logo).
@@ -73,8 +73,8 @@ async function addRenditions(fileId, pngBuffer) {
       .webp({ quality: 82 })
       .toBuffer({ resolveWithObject: true });
     const stored = await storage.putBuffer(data);
-    db.run(
-      `INSERT OR REPLACE INTO file_renditions (file_id, kind, storage_key, mime, width, height, size_bytes, created_at)
+    await db.run(
+      `REPLACE INTO file_renditions (file_id, kind, storage_key, mime, width, height, size_bytes, created_at)
        VALUES (?, ?, ?, 'image/webp', ?, ?, ?, ?)`,
       [fileId, kind, stored.key, info.width, info.height, stored.size, at],
     );
@@ -85,67 +85,67 @@ try {
   const staff = {};
   for (const account of DEV_ACCOUNTS) staff[account.key] = await ensureUser(account);
 
-  let client = db.get("SELECT * FROM clients WHERE name = ?", [CLIENT_NAME]);
+  let client = await db.get("SELECT * FROM clients WHERE name = ?", [CLIENT_NAME]);
   if (!client) {
     const id = newId("cli");
-    db.run(
+    await db.run(
       `INSERT INTO clients (id, name, contact_name, contact_email, status, internal_notes, created_by, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
       [id, CLIENT_NAME, DEV_CLIENT_ACCOUNT.name, DEV_CLIENT_ACCOUNT.email, "Cliente de exemplo para desenvolvimento.", staff.admin.id, at, at],
     );
-    client = db.get("SELECT * FROM clients WHERE id = ?", [id]);
+    client = await db.get("SELECT * FROM clients WHERE id = ?", [id]);
   }
-  let brand = db.get("SELECT * FROM brands WHERE client_id = ? AND slug = ?", [client.id, BRAND.slug]);
+  let brand = await db.get("SELECT * FROM brands WHERE client_id = ? AND slug = ?", [client.id, BRAND.slug]);
   if (!brand) {
     const id = newId("brd");
-    db.run(
+    await db.run(
       `INSERT INTO brands (id, client_id, name, slug, description, status, created_by, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
       [id, client.id, BRAND.name, BRAND.slug, "Marca de exemplo para desenvolvimento.", staff.admin.id, at, at],
     );
-    brand = db.get("SELECT * FROM brands WHERE id = ?", [id]);
+    brand = await db.get("SELECT * FROM brands WHERE id = ?", [id]);
   }
   const clientUser = await ensureUser({ role: "client", clientId: client.id, ...DEV_CLIENT_ACCOUNT });
-  db.run("INSERT OR IGNORE INTO staff_client_access (user_id, client_id, granted_by, granted_at) VALUES (?, ?, ?, ?)", [
+  await db.run("INSERT IGNORE INTO staff_client_access (user_id, client_id, granted_by, granted_at) VALUES (?, ?, ?, ?)", [
     staff.manager.id,
     client.id,
     staff.admin.id,
     at,
   ]);
 
-  let project = db.get("SELECT * FROM projects WHERE brand_id = ? AND name = ?", [brand.id, PROJECT_NAME]);
+  let project = await db.get("SELECT * FROM projects WHERE brand_id = ? AND name = ?", [brand.id, PROJECT_NAME]);
   if (!project) {
     const id = newId("prj");
-    const service = db.get("SELECT id FROM services WHERE name = 'Identidade visual'");
-    db.run(
+    const service = await db.get("SELECT id FROM services WHERE name = 'Identidade visual'");
+    await db.run(
       `INSERT INTO projects (id, brand_id, service_id, name, status, includes_editables, start_date, created_by, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'in_progress', 1, ?, ?, ?, ?)`,
       [id, brand.id, service?.id ?? null, PROJECT_NAME, at.slice(0, 10), staff.admin.id, at, at],
     );
-    project = db.get("SELECT * FROM projects WHERE id = ?", [id]);
+    project = await db.get("SELECT * FROM projects WHERE id = ?", [id]);
   }
-  db.run("INSERT OR IGNORE INTO project_members (project_id, user_id, role, added_by, added_at) VALUES (?, ?, 'designer', ?, ?)", [
+  await db.run("INSERT IGNORE INTO project_members (project_id, user_id, role, added_by, added_at) VALUES (?, ?, 'designer', ?, ?)", [
     project.id,
     staff.designer.id,
     staff.admin.id,
     at,
   ]);
 
-  const existingLogo = db.get("SELECT id FROM materials WHERE brand_id = ? AND title = ?", [brand.id, LOGO_TITLE]);
+  const existingLogo = await db.get("SELECT id FROM materials WHERE brand_id = ? AND title = ?", [brand.id, LOGO_TITLE]);
   if (!existingLogo) {
     const svg = logoSvg();
     const png = await sharp(svg, { density: 144 }).resize({ width: 1200 }).png().toBuffer();
     const pngMeta = await sharp(png).metadata();
     const svgStored = await storage.putBuffer(svg);
     const pngStored = await storage.putBuffer(png);
-    const category = db.get("SELECT id FROM categories WHERE slug = 'logotipo'");
+    const category = await db.get("SELECT id FROM categories WHERE slug = 'logotipo'");
     const materialId = newId("mat");
     const versionId = newId("ver");
     const releaseId = newId("rel");
     const svgFileId = newId("fil");
     const pngFileId = newId("fil");
-    db.tx(() => {
-      db.run(
+    await db.tx(async () => {
+      await db.run(
         `INSERT INTO materials (id, kind, brand_id, project_id, category_id, title, description, tags, owner_id, variant,
            preview_bg, is_primary, sort_order, visibility, download_enabled, editable_included, requires_approval,
            approval_status, current_version_id, released_version_id, released_at, released_by, delivered_at,
@@ -157,27 +157,27 @@ try {
           staff.designer.id, versionId, versionId, at, staff.manager.id, at, staff.designer.id, at, at,
         ],
       );
-      db.run(
+      await db.run(
         `INSERT INTO material_versions (id, material_id, number, status, change_summary, created_by, created_at,
            submitted_at, released_at, released_by)
          VALUES (?, ?, 1, 'released', 'Primeira versão', ?, ?, ?, ?, ?)`,
         [versionId, materialId, staff.designer.id, at, at, at, staff.manager.id],
       );
-      const insertFile = (id, position, name, ext, mime, stored, kind, width, height) =>
-        db.run(
+      const insertFile = async (id, position, name, ext, mime, stored, kind, width, height) =>
+        await db.run(
           `INSERT INTO material_files (id, version_id, material_id, role, position, original_name, display_name, ext, mime,
              size_bytes, sha256, storage_key, media_kind, width, height, preview_status, created_by, created_at)
            VALUES (?, ?, ?, 'original', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)`,
           [id, versionId, materialId, position, name, name, ext, mime, stored.size, stored.sha256, stored.key, kind, width, height, staff.designer.id, at],
         );
-      insertFile(svgFileId, 1, "aurora-logo-principal.svg", "svg", "image/svg+xml", svgStored, "vector", 1200, 480);
-      insertFile(pngFileId, 2, "aurora-logo-principal.png", "png", "image/png", pngStored, "image", pngMeta.width, pngMeta.height);
-      db.run(
+      await insertFile(svgFileId, 1, "aurora-logo-principal.svg", "svg", "image/svg+xml", svgStored, "vector", 1200, 480);
+      await insertFile(pngFileId, 2, "aurora-logo-principal.png", "png", "image/png", pngStored, "image", pngMeta.width, pngMeta.height);
+      await db.run(
         `INSERT INTO releases (id, client_id, brand_id, actor_id, message, notify_email, notify_app, created_at)
          VALUES (?, ?, ?, ?, ?, 0, 1, ?)`,
         [releaseId, client.id, brand.id, staff.manager.id, "Logo principal disponível (exemplo).", at],
       );
-      db.run("INSERT INTO release_items (release_id, material_id, version_id, download_enabled) VALUES (?, ?, ?, 1)", [
+      await db.run("INSERT INTO release_items (release_id, material_id, version_id, download_enabled) VALUES (?, ?, ?, 1)", [
         releaseId,
         materialId,
         versionId,
@@ -186,7 +186,7 @@ try {
     await addRenditions(svgFileId, png);
     await addRenditions(pngFileId, png);
     const actor = { ctx, user: staff.manager };
-    logActivity(actor, {
+    await logActivity(actor, {
       action: "material.released",
       entityType: "material",
       entityId: materialId,
@@ -204,5 +204,5 @@ try {
   console.log(`  ${"client".padEnd(9)} ${clientUser.email}  (${CLIENT_NAME})`);
   console.log("\nAs senhas estão em server/scripts/seed-dev.js (DEV_ACCOUNTS e DEV_CLIENT_ACCOUNT).");
 } finally {
-  ctx.db.close();
+  await ctx.db.close();
 }

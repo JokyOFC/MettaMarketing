@@ -339,9 +339,9 @@ export function formatDateBR(date) {
 // ------------------------------------------------------------------ reconciliation
 
 // Admins and the finance team: they follow every charge.
-export function financeTeamIds(db) {
-  return db
-    .all("SELECT id FROM users WHERE role IN ('admin', 'finance') AND status = 'active'")
+export async function financeTeamIds(db) {
+  return (await db
+    .all("SELECT id FROM users WHERE role IN ('admin', 'finance') AND status = 'active'"))
     .map((row) => row.id);
 }
 
@@ -385,15 +385,15 @@ function preapprovalIdOf(payment) {
 }
 
 // Finds the order or subscription a payment belongs to.
-export function resolveReference(db, { externalReference, preapprovalId }) {
+export async function resolveReference(db, { externalReference, preapprovalId }) {
   if (externalReference) {
-    const order = db.get("SELECT * FROM orders WHERE external_reference = ?", [String(externalReference)]);
+    const order = await db.get("SELECT * FROM orders WHERE external_reference = ?", [String(externalReference)]);
     if (order) return { order };
-    const subscription = db.get("SELECT * FROM subscriptions WHERE external_reference = ?", [String(externalReference)]);
+    const subscription = await db.get("SELECT * FROM subscriptions WHERE external_reference = ?", [String(externalReference)]);
     if (subscription) return { subscription };
   }
   if (preapprovalId) {
-    const subscription = db.get("SELECT * FROM subscriptions WHERE mp_preapproval_id = ?", [String(preapprovalId)]);
+    const subscription = await db.get("SELECT * FROM subscriptions WHERE mp_preapproval_id = ?", [String(preapprovalId)]);
     if (subscription) return { subscription };
   }
   return {};
@@ -412,9 +412,9 @@ const subscriptionLink = (id) => `/admin/pedidos?aba=assinaturas&assinatura=${id
  * logs only when something actually changed. -> { kind, id, changed }
  * Throws ReconcileError for references that do not belong to this platform.
  */
-export function applyPayment(ctx, payment, { preapprovalId = null } = {}) {
+export async function applyPayment(ctx, payment, { preapprovalId = null } = {}) {
   const { db } = ctx;
-  const ref = resolveReference(db, {
+  const ref = await resolveReference(db, {
     externalReference: payment.external_reference,
     preapprovalId: preapprovalId ?? preapprovalIdOf(payment),
   });
@@ -432,12 +432,12 @@ export function applyPayment(ctx, payment, { preapprovalId = null } = {}) {
   const subscription = ref.subscription ?? null;
   const clientId = order?.client_id ?? subscription?.client_id ?? null;
 
-  return db.tx(() => {
-    const previous = db.get("SELECT * FROM payments WHERE provider = 'mercadopago' AND provider_payment_id = ?", [
+  return await db.tx(async () => {
+    const previous = await db.get("SELECT * FROM payments WHERE provider = 'mercadopago' AND provider_payment_id = ?", [
       String(payment.id),
     ]);
     if (previous) {
-      db.run(
+      await db.run(
         `UPDATE payments SET status = ?, status_detail = ?, amount_cents = ?, method = ?, paid_at = COALESCE(?, paid_at),
            raw = ?, order_id = COALESCE(order_id, ?), subscription_id = COALESCE(subscription_id, ?),
            client_id = COALESCE(client_id, ?), updated_at = ?
@@ -445,7 +445,7 @@ export function applyPayment(ctx, payment, { preapprovalId = null } = {}) {
         [status, detail, amount, paymentMethod(payment), paidAt, rawSubset(payment), order?.id, subscription?.id, clientId, at, previous.id],
       );
     } else {
-      db.run(
+      await db.run(
         `INSERT INTO payments (id, provider, provider_payment_id, order_id, subscription_id, client_id, status,
            status_detail, amount_cents, method, paid_at, raw, created_at, updated_at)
          VALUES (?, 'mercadopago', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -467,20 +467,20 @@ export function applyPayment(ctx, payment, { preapprovalId = null } = {}) {
       );
     }
     const statusChanged = !previous || previous.status !== status;
-    if (order) return { kind: "order", id: order.id, changed: applyToOrder(ctx, order, { status, detail, amount, paidAt, statusChanged }) };
+    if (order) return { kind: "order", id: order.id, changed: await applyToOrder(ctx, order, { status, detail, amount, paidAt, statusChanged }) };
     return {
       kind: "subscription",
       id: subscription.id,
-      changed: applyToSubscriptionPayment(ctx, subscription, { status, detail, amount, statusChanged }),
+      changed: await applyToSubscriptionPayment(ctx, subscription, { status, detail, amount, statusChanged }),
     };
   });
 }
 
-function applyToOrder(ctx, order, { status, detail, amount, paidAt, statusChanged }) {
+async function applyToOrder(ctx, order, { status, detail, amount, paidAt, statusChanged }) {
   const { db } = ctx;
   const at = now();
   const label = `${order.description} (${formatBRL(amount ?? order.amount_cents)})`;
-  const client = db.get("SELECT name FROM clients WHERE id = ?", [order.client_id]);
+  const client = await db.get("SELECT name FROM clients WHERE id = ?", [order.client_id]);
   const staffTitle = (text) => `${text} · ${client?.name ?? "Cliente"}`;
   const base = { entityType: "order", entityId: order.id, clientId: order.client_id, brandId: order.brand_id };
 
@@ -489,13 +489,13 @@ function applyToOrder(ctx, order, { status, detail, amount, paidAt, statusChange
     if (order.status === "cancelled" || order.status === "refunded") {
       // Money arrived through an old link: keep the decision visible to finance.
       if (!statusChanged) return false;
-      logActivity(ctx, {
+      await logActivity(ctx, {
         ...base,
         action: "payment.approved_after_cancel",
         summary: `Pagamento aprovado para pedido ${order.status === "cancelled" ? "cancelado" : "estornado"}: ${label}. Verifique se é preciso estornar.`,
         data: { amountCents: amount },
       });
-      notify(ctx, financeTeamIds(db), {
+      await notify(ctx, await financeTeamIds(db), {
         type: "payment.attention",
         title: staffTitle("Pagamento recebido em pedido cancelado"),
         body: `${label}. Confira no Mercado Pago se é preciso estornar.`,
@@ -506,19 +506,19 @@ function applyToOrder(ctx, order, { status, detail, amount, paidAt, statusChange
       });
       return false;
     }
-    db.run("UPDATE orders SET status = 'paid', paid_at = ?, failure_reason = NULL, updated_at = ? WHERE id = ?", [
+    await db.run("UPDATE orders SET status = 'paid', paid_at = ?, failure_reason = NULL, updated_at = ? WHERE id = ?", [
       paidAt ?? at,
       at,
       order.id,
     ]);
-    logActivity(ctx, {
+    await logActivity(ctx, {
       ...base,
       action: "payment.approved",
       summary: `Pagamento confirmado: ${label}`,
       data: { amountCents: amount },
       visibility: "client",
     });
-    notify(ctx, clientUserIds(db, order.client_id), {
+    await notify(ctx, await clientUserIds(db, order.client_id), {
       type: "payment.approved",
       title: "Pagamento confirmado",
       body: `Recebemos o pagamento de ${formatBRL(amount ?? order.amount_cents)} referente a ${order.description}. Obrigado!`,
@@ -532,7 +532,7 @@ function applyToOrder(ctx, order, { status, detail, amount, paidAt, statusChange
       ],
       actionLabel: "Ver financeiro",
     });
-    notify(ctx, financeTeamIds(db), {
+    await notify(ctx, await financeTeamIds(db), {
       type: "payment.approved",
       title: staffTitle("Pagamento aprovado"),
       body: label,
@@ -548,15 +548,15 @@ function applyToOrder(ctx, order, { status, detail, amount, paidAt, statusChange
     // Old attempts that did not change never pull a newer link back to failed.
     if (!statusChanged || !["draft", "pending_payment", "failed"].includes(order.status)) return false;
     const reason = paymentReason(status, detail) ?? "Pagamento não aprovado";
-    db.run("UPDATE orders SET status = 'failed', failure_reason = ?, updated_at = ? WHERE id = ?", [reason, at, order.id]);
-    logActivity(ctx, {
+    await db.run("UPDATE orders SET status = 'failed', failure_reason = ?, updated_at = ? WHERE id = ?", [reason, at, order.id]);
+    await logActivity(ctx, {
       ...base,
       action: "payment.rejected",
       summary: `Pagamento não aprovado: ${label}. Motivo: ${reason}`,
       data: { amountCents: amount, statusDetail: detail },
       visibility: "client",
     });
-    notify(ctx, clientUserIds(db, order.client_id), {
+    await notify(ctx, await clientUserIds(db, order.client_id), {
       type: "payment.failed",
       title: "Pagamento não aprovado",
       body: `${reason}. Você pode tentar de novo em Financeiro, com outro cartão ou via Pix.`,
@@ -571,7 +571,7 @@ function applyToOrder(ctx, order, { status, detail, amount, paidAt, statusChange
       ],
       actionLabel: "Tentar de novo",
     });
-    notify(ctx, financeTeamIds(db), {
+    await notify(ctx, await financeTeamIds(db), {
       type: "payment.failed",
       title: staffTitle("Pagamento recusado"),
       body: `${label}. Motivo: ${reason}`,
@@ -585,8 +585,8 @@ function applyToOrder(ctx, order, { status, detail, amount, paidAt, statusChange
 
   if (status === "pending" || status === "in_process" || status === "authorized") {
     if (!statusChanged || !["draft", "failed"].includes(order.status)) return false;
-    db.run("UPDATE orders SET status = 'pending_payment', failure_reason = NULL, updated_at = ? WHERE id = ?", [at, order.id]);
-    logActivity(ctx, {
+    await db.run("UPDATE orders SET status = 'pending_payment', failure_reason = NULL, updated_at = ? WHERE id = ?", [at, order.id]);
+    await logActivity(ctx, {
       ...base,
       action: "payment.pending",
       summary: `Pagamento em processamento: ${label}. ${paymentReason(status, detail) ?? ""}`.trim(),
@@ -597,10 +597,10 @@ function applyToOrder(ctx, order, { status, detail, amount, paidAt, statusChange
 
   if (status === "refunded" || status === "charged_back") {
     if (order.status !== "paid") return false;
-    db.run("UPDATE orders SET status = 'refunded', updated_at = ? WHERE id = ?", [at, order.id]);
+    await db.run("UPDATE orders SET status = 'refunded', updated_at = ? WHERE id = ?", [at, order.id]);
     const what = status === "refunded" ? "Pagamento estornado" : "Pagamento contestado";
-    logActivity(ctx, { ...base, action: `payment.${status}`, summary: `${what}: ${label}`, visibility: "client" });
-    notify(ctx, financeTeamIds(db), {
+    await logActivity(ctx, { ...base, action: `payment.${status}`, summary: `${what}: ${label}`, visibility: "client" });
+    await notify(ctx, await financeTeamIds(db), {
       type: `payment.${status}`,
       title: staffTitle(what),
       body: label,
@@ -614,22 +614,22 @@ function applyToOrder(ctx, order, { status, detail, amount, paidAt, statusChange
   return false;
 }
 
-function applyToSubscriptionPayment(ctx, subscription, { status, detail, amount, statusChanged }) {
+async function applyToSubscriptionPayment(ctx, subscription, { status, detail, amount, statusChanged }) {
   const { db } = ctx;
   if (!statusChanged) return false;
   const at = now();
-  const service = db.get("SELECT name FROM services WHERE id = ?", [subscription.service_id]);
+  const service = await db.get("SELECT name FROM services WHERE id = ?", [subscription.service_id]);
   const label = `${service?.name ?? "Assinatura"} (${formatBRL(amount ?? subscription.amount_cents)})`;
   const base = { entityType: "subscription", entityId: subscription.id, clientId: subscription.client_id };
   if (status === "approved") {
-    db.run("UPDATE subscriptions SET failure_reason = NULL, updated_at = ? WHERE id = ?", [at, subscription.id]);
-    logActivity(ctx, {
+    await db.run("UPDATE subscriptions SET failure_reason = NULL, updated_at = ? WHERE id = ?", [at, subscription.id]);
+    await logActivity(ctx, {
       ...base,
       action: "subscription.payment_approved",
       summary: `Mensalidade paga: ${label}`,
       visibility: "client",
     });
-    notify(ctx, financeTeamIds(db), {
+    await notify(ctx, await financeTeamIds(db), {
       type: "payment.approved",
       title: "Mensalidade recebida",
       body: label,
@@ -641,18 +641,18 @@ function applyToSubscriptionPayment(ctx, subscription, { status, detail, amount,
   }
   if (status === "rejected" || status === "cancelled") {
     const reason = paymentReason(status, detail) ?? "Cobrança não aprovada";
-    db.run("UPDATE subscriptions SET failure_reason = ?, updated_at = ? WHERE id = ?", [
+    await db.run("UPDATE subscriptions SET failure_reason = ?, updated_at = ? WHERE id = ?", [
       `Última cobrança não aprovada: ${reason}`,
       at,
       subscription.id,
     ]);
-    logActivity(ctx, {
+    await logActivity(ctx, {
       ...base,
       action: "subscription.payment_failed",
       summary: `Mensalidade não aprovada: ${label}. Motivo: ${reason}`,
       visibility: "client",
     });
-    notify(ctx, clientUserIds(db, subscription.client_id), {
+    await notify(ctx, await clientUserIds(db, subscription.client_id), {
       type: "payment.failed",
       title: "Mensalidade não aprovada",
       body: `${reason}. O Mercado Pago tenta a cobrança de novo; se preferir, atualize o cartão na sua conta do Mercado Pago.`,
@@ -661,7 +661,7 @@ function applyToSubscriptionPayment(ctx, subscription, { status, detail, amount,
       entityId: subscription.id,
       email: true,
     });
-    notify(ctx, financeTeamIds(db), {
+    await notify(ctx, await financeTeamIds(db), {
       type: "payment.failed",
       title: "Mensalidade recusada",
       body: `${label}. Motivo: ${reason}`,
@@ -681,12 +681,12 @@ const PREAPPROVAL_STATUS = { authorized: "active", paused: "paused", cancelled: 
  * Applies a preapproval fetched from the API: authorized -> active, paused,
  * cancelled. -> { kind, id, changed }
  */
-export function applyPreapproval(ctx, preapproval) {
+export async function applyPreapproval(ctx, preapproval) {
   const { db } = ctx;
   let subscription = preapproval.external_reference
-    ? db.get("SELECT * FROM subscriptions WHERE external_reference = ?", [String(preapproval.external_reference)])
+    ? await db.get("SELECT * FROM subscriptions WHERE external_reference = ?", [String(preapproval.external_reference)])
     : null;
-  subscription ??= db.get("SELECT * FROM subscriptions WHERE mp_preapproval_id = ?", [String(preapproval.id)]);
+  subscription ??= await db.get("SELECT * FROM subscriptions WHERE mp_preapproval_id = ?", [String(preapproval.id)]);
   if (!subscription)
     throw new ReconcileError(
       `Referência desconhecida (${preapproval.external_reference || "sem external_reference"}): assinatura ${preapproval.id} não pertence à plataforma.`,
@@ -700,31 +700,31 @@ export function applyPreapproval(ctx, preapproval) {
 
   const at = now();
   const nextBilling = preapproval.next_payment_date ? String(preapproval.next_payment_date).slice(0, 10) : null;
-  return db.tx(() => {
-    db.run(
+  return await db.tx(async () => {
+    await db.run(
       `UPDATE subscriptions SET mp_preapproval_id = ?, next_billing_date = COALESCE(?, next_billing_date), updated_at = ? WHERE id = ?`,
       [String(preapproval.id), nextBilling, at, subscription.id],
     );
     if (subscription.status === next || (subscription.status === "cancelled" && next !== "cancelled"))
       return { kind: "subscription", id: subscription.id, changed: false };
 
-    const service = db.get("SELECT name FROM services WHERE id = ?", [subscription.service_id]);
-    const client = db.get("SELECT name FROM clients WHERE id = ?", [subscription.client_id]);
+    const service = await db.get("SELECT name FROM services WHERE id = ?", [subscription.service_id]);
+    const client = await db.get("SELECT name FROM clients WHERE id = ?", [subscription.client_id]);
     const name = service?.name ?? "Assinatura";
     const base = { entityType: "subscription", entityId: subscription.id, clientId: subscription.client_id };
     if (next === "active") {
-      db.run(
+      await db.run(
         `UPDATE subscriptions SET status = 'active', started_at = COALESCE(started_at, ?), failure_reason = NULL, updated_at = ? WHERE id = ?`,
         [toIso(preapproval.date_created) ?? at, at, subscription.id],
       );
     } else if (next === "cancelled") {
-      db.run("UPDATE subscriptions SET status = 'cancelled', cancelled_at = COALESCE(cancelled_at, ?), updated_at = ? WHERE id = ?", [
+      await db.run("UPDATE subscriptions SET status = 'cancelled', cancelled_at = COALESCE(cancelled_at, ?), updated_at = ? WHERE id = ?", [
         at,
         at,
         subscription.id,
       ]);
     } else {
-      db.run("UPDATE subscriptions SET status = ?, updated_at = ? WHERE id = ?", [next, at, subscription.id]);
+      await db.run("UPDATE subscriptions SET status = ?, updated_at = ? WHERE id = ?", [next, at, subscription.id]);
     }
     const copy = {
       active: ["Assinatura ativa", `A assinatura ${name} (${formatBRL(subscription.amount_cents)}/mês) foi autorizada no Mercado Pago.`],
@@ -732,14 +732,14 @@ export function applyPreapproval(ctx, preapproval) {
       cancelled: ["Assinatura cancelada", `A assinatura ${name} foi cancelada no Mercado Pago.`],
       pending: ["Assinatura aguardando autorização", `A assinatura ${name} aguarda autorização no Mercado Pago.`],
     }[next];
-    logActivity(ctx, {
+    await logActivity(ctx, {
       ...base,
       action: `subscription.${next}`,
       summary: copy[1],
       visibility: next === "pending" ? "internal" : "client",
     });
     if (next !== "pending") {
-      notify(ctx, clientUserIds(db, subscription.client_id), {
+      await notify(ctx, await clientUserIds(db, subscription.client_id), {
         type: `subscription.${next}`,
         title: copy[0],
         body: copy[1],
@@ -748,7 +748,7 @@ export function applyPreapproval(ctx, preapproval) {
         entityId: subscription.id,
         email: true,
       });
-      notify(ctx, financeTeamIds(db), {
+      await notify(ctx, await financeTeamIds(db), {
         type: `subscription.${next}`,
         title: `${copy[0]} · ${client?.name ?? "Cliente"}`,
         body: copy[1],
@@ -779,36 +779,36 @@ export const topicKind = (topic) => TOPICS[String(topic ?? "")] ?? null;
  */
 export async function processWebhookEvent(ctx, eventId, { topic, resourceId }) {
   const { db } = ctx;
-  const finish = (error = null) => {
+  const finish = async (error = null) => {
     try {
-      db.run("UPDATE webhook_events SET processed_at = ?, error = ? WHERE id = ?", [now(), error, eventId]);
+      await db.run("UPDATE webhook_events SET processed_at = ?, error = ? WHERE id = ?", [now(), error, eventId]);
     } catch (err) {
       ctx.log?.error?.("[mercadopago] could not record webhook result", err);
     }
   };
   const kind = topicKind(topic);
   try {
-    if (!kind) return finish(null);
-    if (!resourceId) return finish("Notificação sem o identificador do recurso (data.id).");
+    if (!kind) return await finish(null);
+    if (!resourceId) return await finish("Notificação sem o identificador do recurso (data.id).");
     if (kind === "payment") {
-      applyPayment(ctx, await getPayment(ctx, resourceId));
+      await applyPayment(ctx, await getPayment(ctx, resourceId));
     } else if (kind === "preapproval") {
-      applyPreapproval(ctx, await getPreapproval(ctx, resourceId));
+      await applyPreapproval(ctx, await getPreapproval(ctx, resourceId));
     } else {
       const authorized = await getAuthorizedPayment(ctx, resourceId);
       const paymentId = authorized?.payment?.id;
-      if (!paymentId) return finish(null);
+      if (!paymentId) return await finish(null);
       const payment = await getPayment(ctx, paymentId);
-      applyPayment(ctx, { ...payment, external_reference: payment.external_reference ?? authorized.external_reference }, {
+      await applyPayment(ctx, { ...payment, external_reference: payment.external_reference ?? authorized.external_reference }, {
         preapprovalId: authorized.preapproval_id ?? null,
       });
     }
-    return finish(null);
+    return await finish(null);
   } catch (err) {
     const message =
       err instanceof ReconcileError || err?.status ? String(err.message) : "Falha inesperada ao processar a notificação.";
     if (!(err instanceof ReconcileError) && !err?.status) ctx.log?.error?.("[mercadopago] webhook processing failed", err);
-    return finish(message.slice(0, 500));
+    return await finish(message.slice(0, 500));
   }
 }
 

@@ -8,16 +8,17 @@ está em `server/db/migrations/001_init.sql`.
 
 - **Frontend:** o mesmo app React 19 + Vite + React Router do site. O produto vive em
   `src/app/`. Área do cliente em `/painel/*`; painel da Metta em `/admin/*`.
-- **Backend:** Node.js 22+ (ESM), Express 5, em `server/`. Banco SQLite via `node:sqlite`
-  (sem dependência nativa), modo WAL. Arquivos em armazenamento privado
-  (`DATA_DIR/storage`), nunca servidos como estáticos.
+- **Backend:** Node.js 22+ (ESM), Express 5, em `server/`. Banco MySQL 8.0.23+ via `mysql2`
+  (pool, acesso assíncrono; `DATABASE_URL`), regras em §4.1. Arquivos em armazenamento
+  privado (`DATA_DIR/storage`), nunca servidos como estáticos.
 - **Desenvolvimento:** `npm run dev` (Vite, porta 5173) + `npm run dev:api` (API, porta 8787).
   O Vite faz proxy de `/api` e `/dl` para a API.
 - **Produção:** `npm run build && npm start`. O processo Node serve `dist/`, a API e o
   fallback SPA de `/painel/*` e `/admin/*`. O site institucional continua gerando HTML
   estático por rota.
 - **Testes:** `npm test` (node:test) sobe a API em porta efêmera com `DATA_DIR`
-  temporário.
+  temporário e um banco MySQL próprio por servidor de teste (`metta_test_*`, criado e
+  apagado pelos testes) no servidor de `TEST_DATABASE_URL` ou `DATABASE_URL`.
 
 ### Estrutura
 
@@ -26,7 +27,7 @@ server/
   index.js            entrada: carrega config, migra, inicia workers, escuta
   app.js              monta middlewares e routers (createApp({config}) para testes)
   config.js           variáveis de ambiente e padrões
-  db/                 connection.js (wrapper node:sqlite), migrate.js, migrations/, seed.js
+  db/                 connection.js (pool mysql2 + transações), migrate.js, migrations/, seed.js
   lib/                núcleo compartilhado (ver §4)
   routes/             um router por domínio (ver §9, dono de cada arquivo)
   services/           regras de domínio reutilizáveis entre routers
@@ -97,7 +98,7 @@ portal.access
    baixável se uma fonte da marca **liberada** (`brand_fonts.visibility = 'released'`) vinculada
    ao material estiver com `distribution = 'allowed'` (`font_distributable = 1`, recalculado por
    `syncFontDistribution` na liberação, ocultação, edição e remoção; arquivos novos seguem a
-   mesma regra pelo gatilho `material_files_font_licence`); caso contrário, mostrar
+   mesma regra em `attachUploads` e nas cópias de versão — §4.1); caso contrário, mostrar
    referência/link oficial. Fonte em rascunho nunca libera arquivos.
 6. Notas internas (`internal_notes`), comentários `visibility = 'internal'`, `storage_key`,
    dados de equipe, `visibility` de rascunho e histórico interno **nunca** aparecem em
@@ -161,7 +162,7 @@ Versões (`material_versions.status`): `draft`, `internal_review`, `released`,
 | `access.js`      | Escopo (aceitam `req`): `getScope(req)`; `assertClient`, `assertBrand`, `assertProject`, `assertMaterial(req, id, {write})`, `assertVersion(req, id, {write})` (linha + `.material` não enumerável), `assertFile(req, id, {download, write})` (linha + `.version` e `.material`; `download` aplica 403 `download_disabled`/`font_license`) — retornam a linha ou lançam 404; `canWriteMaterial`, `clientCanSeeMaterial`, `clientCanSeeFile`, `downloadRule`; `scopeSql.clients|brands|projects|materials(req ou user, alias)` → `{sql, params}` para listas; `clientMaterialFilter`, `clientVersionFilter`, `clientFileFilter` com as regras do §2.4. |
 | `audit.js`       | `logActivity(req | ctx, {action, entityType, entityId, clientId, brandId, projectId, materialId, summary, data, visibility})`. |
 | `notify.js`      | `notify(req | ctx, userIds, {type, title, body, link, entityType, entityId, email, emailLines, actionLabel, includeSelf})` cria notificações (pula quem executou a ação, salvo `includeSelf`) e enfileira e-mails respeitando `notify_email`; destinatários: `clientUserIds(db, clientId)` (= `usersForClient`), `managerIdsForClient(db, clientId)`, `adminIds(db)`, `staffIdsForMaterial(db, material)`, `staffForBrand(db, brandId)`. |
-| `mailer.js`      | SMTP via nodemailer quando configurado; senão grava no `email_outbox` como `not_configured` (visível em Configurações). Nunca finge envio. `ctx.mailer.isConfigured()`, `retry(id)`, `idle()`. Modelo HTML em `emails.js` (`renderEmail`). |
+| `mailer.js`      | SMTP via nodemailer quando configurado; senão grava no `email_outbox` como `not_configured` (visível em Configurações). Nunca finge envio. `send(msg)` grava e entrega (resolve com o resultado); `enqueue(msg)` grava na hora — dentro da transação em curso — e entrega depois do commit, sem esperar (avisos, links de senha). `isConfigured()`, `retry(id)`, `idle()`. Modelo HTML em `emails.js` (`renderEmail`). |
 | `storage.js`     | `ctx.storage`: `putStream(readable, {maxBytes})`, `putBuffer(buffer)`, `putFile(path, {move})`, `put(buffer|readable)` → `{key,size,sha256}`; `createReadStream(key, {start,end})`, `stat`, `exists`, `remove`, `tmpPath()`, `usage()`. Driver local em `DATA_DIR/storage`. Chaves opacas; apagar só com `removeStorageIfUnreferenced` (§4 serviços), pois vários registros compartilham a mesma chave. |
 | `signed.js`      | `ctx.signer`: links temporários HMAC-SHA256 (`APP_SECRET`): `sign({t:'file'|'zip', id, u:userId}, ttlSec=300)` → token; `issue(payload, ttl)` → `{token, url:'/dl/<token>', expiresAt}`; `verify(token)` → payload, `{expired:true,…}` ou null. O resgate exige a mesma sessão do `u` **e** nova checagem de acesso. |
 | `media.js`       | Allowlist de extensões, `checkSignature`, `inspect` (sharp para imagem, ffprobe opcional), `sanitizeFilename`, `safeSegment` (pastas de ZIP), `formatLabel`, `COMPRESSED_EXTS`. |
@@ -190,6 +191,39 @@ Serviços de domínio compartilhados (`server/services`):
   documento ou capa enviada.
 - `zips.js` — fila em processo; progresso real por bytes; `store` para formatos já
   comprimidos; expira em 24 h; jobs em execução num reinício viram `failed` com mensagem.
+
+### 4.1 Banco de dados (MySQL)
+
+- **Versão:** MySQL 8.0.23 ou mais novo (colunas `INVISIBLE`, `JSON_TABLE`, `CHECK`,
+  `DEFAULT (expressão)` e `INSERT … AS alias ON DUPLICATE KEY UPDATE`). Conexão por
+  `DATABASE_URL=mysql://usuario:senha@host:3306/banco` (`?ssl=true` para TLS) e
+  `DB_POOL_SIZE` (padrão 10). Na primeira subida o banco é criado se o usuário puder; as
+  migrações (`server/db/migrations/*.sql`) rodam sozinhas na inicialização. DDL no MySQL
+  não é transacional: uma migração que falhe no meio precisa de conferência manual.
+- **API (`ctx.db`):** tudo é assíncrono — `await db.get/all/run(sql, [params])`
+  (`run` → `{changes, lastInsertRowid}`, `changes` conta linhas encontradas), `db.exec`,
+  `await db.tx(async () => …)`. Parâmetros só posicionais (`?`); objetos precisam de
+  `JSON.stringify`. Uma lista `IN ()` vazia vale como conjunto vazio (como no SQLite).
+- **Transações:** as de nível superior rodam uma por vez no processo (equivalente ao
+  `BEGIN IMMEDIATE` do SQLite), com `SAVEPOINT` para as aninhadas e nova tentativa em
+  deadlock. Qualquer `db.*` chamado dentro de `db.tx`, mesmo por funções auxiliares, usa a
+  conexão da transação. `db.afterCommit(fn)` roda depois do commit (descartado no
+  rollback); `ctx.jobs.enqueue` chamado dentro de uma transação só começa depois do
+  commit; e-mails de aviso usam `ctx.mailer.enqueue` (gravados na transação, entregues
+  depois).
+- **Esquema:** tabelas InnoDB `utf8mb4_bin` (comparação e ordem exatas, como o app
+  espera); `users.email` e `login_attempts.email` comparam sem diferenciar maiúsculas
+  (`utf8mb4_0900_as_ci`). Buscas de texto usam `LIKE ? COLLATE utf8mb4_0900_ai_ci`
+  (ignoram maiúsculas e acentos) e listas por nome ordenam com a mesma collation.
+  Datas são texto ISO-8601 UTC. `seq` (AUTO_INCREMENT invisível) desempata ordens por
+  criação. `settings.name` e `brand_colors/brand_fonts.usage_notes` evitam palavras
+  reservadas do MySQL.
+- **Regras que o MySQL não expressa** ficam no código: um contrato vivo por pedido ou
+  assinatura (verificado dentro da transação de criação), papel `client` ⇔ `client_id` e
+  a licença de fontes em arquivos novos (`attachUploads` e cópias de versão). Não há
+  gatilhos (hospedagens compartilhadas costumam recusar `CREATE TRIGGER`).
+- **Backup:** banco (`mysqldump --single-transaction`) **e** `DATA_DIR/storage` — um não
+  serve sem o outro.
 
 ## 5. Estrutura dos ZIPs
 
@@ -315,6 +349,10 @@ Segue `DESIGN_SYSTEM.md`, adaptado à produtividade.
 
 ## 8. Ambiente de desenvolvimento
 
+- MySQL local: `DATABASE_URL=mysql://usuario:senha@127.0.0.1:3306/metta` no `site/.env`.
+  O mesmo usuário precisa criar e apagar bancos `metta_test_*` para `npm test`
+  (ou use `TEST_DATABASE_URL` com outro usuário). Os testes leem só essas duas chaves do
+  `.env`; o resto (AssinaVelox, SMTP…) nunca vaza para eles.
 - `npm run seed:dev` cria contas de teste (senhas em `server/scripts/seed-dev.js`,
   somente fora de produção) e dados mínimos para testar os fluxos.
 - API em outra porta (ex.: 8787 ocupada): `PORT=0` (ou outra) na API e
@@ -323,7 +361,8 @@ Segue `DESIGN_SYSTEM.md`, adaptado à produtividade.
   `node e2e/flows.mjs --base http://127.0.0.1:5173 [--mobile] [--reduced] [--shots <pasta>]`
   com os dois servidores de desenvolvimento no ar e `seed:dev` aplicado. Cada execução cria
   o próprio cliente, marca, projeto e materiais (nomes com carimbo de hora). Por padrão
-  nenhuma senha é digitada: as sessões são criadas no banco de desenvolvimento e revogadas
+  nenhuma senha é digitada: as sessões são criadas no banco de desenvolvimento
+  (`DATABASE_URL` do `.env`; só MySQL local é aceito) e revogadas
   no fim (`--auth ui` usa o formulário de login e o convite). Falha em erro de console,
   resposta 4xx/5xx inesperada ou rolagem horizontal. Detalhes no topo de `e2e/flows.mjs`.
 - Contratos com uma AssinaVelox real (local ou homologação):

@@ -65,9 +65,10 @@ export function activityScope(req, alias = "a") {
 // A ZIP's materials come from zip_jobs.entries, exactly like the material
 // history (routes/materials.js); a ZIP that holds a single material is
 // attributed to it (material_id), a multi-material ZIP only through entries.
-const zipEntries = (zip) => `json_each(CASE WHEN json_valid(${zip}.entries) THEN ${zip}.entries ELSE '[]' END)`;
-const ZIP_MATERIALS = (zipIdSql) =>
-  `SELECT json_extract(je.value, '$.m') AS mid FROM zip_jobs zj, ${zipEntries("zj")} je WHERE zj.id = ${zipIdSql}`;
+const zipEntries = (zip) =>
+  `JSON_TABLE(CASE WHEN JSON_VALID(${zip}.entries) THEN ${zip}.entries ELSE '[]' END, '$[*]'
+     COLUMNS (mid VARCHAR(64) COLLATE utf8mb4_bin PATH '$.m'))`;
+const ZIP_MATERIALS = (zipIdSql) => `SELECT je.mid AS mid FROM zip_jobs zj, ${zipEntries("zj")} je WHERE zj.id = ${zipIdSql}`;
 
 const LOG_ROWS = `SELECT 'log' AS src, l.id, l.actor_id, l.actor_role, l.action, l.entity_type, l.entity_id,
     l.client_id, l.brand_id, l.project_id, l.material_id, l.summary, l.data, l.visibility, l.created_at,
@@ -90,7 +91,8 @@ const DOWNLOAD_ROWS = `SELECT 'download' AS src, d.id, d.user_id AS actor_id, du
     'download' AS entity_type, d.id AS entity_id,
     COALESCE(d.client_id, CASE WHEN du.role = 'client' THEN du.client_id END) AS client_id,
     d.brand_id,
-    COALESCE(dm.project_id, CASE WHEN json_valid(z.scope) THEN json_extract(z.scope, '$.projectId') END) AS project_id,
+    COALESCE(dm.project_id,
+      CASE WHEN JSON_VALID(z.scope) THEN NULLIF(JSON_UNQUOTE(JSON_EXTRACT(z.scope, '$.projectId')), 'null') END) AS project_id,
     d.mat_id AS material_id,
     ${DOWNLOAD_SUMMARY} AS summary,
     NULL AS data, 'internal' AS visibility, d.created_at,
@@ -286,14 +288,14 @@ function clientLink(row, material) {
  * viewer can still open it) and link/linkLabel (an app path the viewer can
  * open, or null). Rows must come from ACTIVITY_COLUMNS/ACTIVITY_FROM.
  */
-export function serializeActivities(req, rows) {
+export async function serializeActivities(req, rows) {
   const db = req.ctx.db;
   const staff = isStaff(req);
   const ids = [...new Set(rows.map(materialIdOf).filter(Boolean))];
   const materials = new Map();
   for (let i = 0; i < ids.length; i += 400) {
     const chunk = ids.slice(i, i + 400);
-    for (const row of db.all(
+    for (const row of await db.all(
       `SELECT m.id, m.title, m.kind, m.visibility, m.archived_at, m.released_version_id, b.client_id
          FROM materials m JOIN brands b ON b.id = m.brand_id WHERE m.id IN (${chunk.map(() => "?").join(", ")})`,
       chunk,
@@ -348,7 +350,7 @@ function actionFilter(values) {
   const params = [];
   for (const value of values.slice(0, 40)) {
     if (value.endsWith(".*")) {
-      parts.push("a.action LIKE ? ESCAPE '\\'");
+      parts.push("a.action LIKE ? COLLATE utf8mb4_0900_ai_ci");
       params.push(`${escapeLike(value.slice(0, -2))}.%`);
     } else {
       parts.push("a.action = ?");
@@ -370,7 +372,7 @@ function dateFilters(q, where, params) {
   }
 }
 
-function staffWhere(req, q) {
+async function staffWhere(req, q) {
   const scope = historyScope(req);
   const where = [scope.sql];
   const params = [...scope.params];
@@ -379,19 +381,19 @@ function staffWhere(req, q) {
     params.push(...values);
   };
   if (q.clientId) {
-    assertClient(req, q.clientId);
+    await assertClient(req, q.clientId);
     add("a.client_id = ?", q.clientId);
   }
   if (q.brandId) {
-    assertBrand(req, q.brandId);
+    await assertBrand(req, q.brandId);
     add("a.brand_id = ?", q.brandId);
   }
   if (q.projectId) {
-    assertProject(req, q.projectId);
+    await assertProject(req, q.projectId);
     add(`(a.project_id = ? OR ${zipHolds("SELECT id FROM materials WHERE project_id = ?")})`, q.projectId, q.projectId);
   }
   if (q.materialId) {
-    assertMaterial(req, q.materialId);
+    await assertMaterial(req, q.materialId);
     add(`(a.material_id = ? OR (a.entity_type = 'material' AND a.entity_id = ?) OR ${zipHolds("?")})`, q.materialId, q.materialId, q.materialId);
   }
   if (q.actorId) add("a.actor_id = ?", q.actorId);
@@ -403,7 +405,7 @@ function staffWhere(req, q) {
   if (q.q) {
     const like = `%${escapeLike(q.q)}%`;
     add(
-      "(a.summary LIKE ? ESCAPE '\\' OR IFNULL(u.name, '') LIKE ? ESCAPE '\\' OR IFNULL(cl.name, '') LIKE ? ESCAPE '\\' OR IFNULL(br.name, '') LIKE ? ESCAPE '\\')",
+      "(a.summary LIKE ? COLLATE utf8mb4_0900_ai_ci OR IFNULL(u.name, '') LIKE ? COLLATE utf8mb4_0900_ai_ci OR IFNULL(cl.name, '') LIKE ? COLLATE utf8mb4_0900_ai_ci OR IFNULL(br.name, '') LIKE ? COLLATE utf8mb4_0900_ai_ci)",
       like,
       like,
       like,
@@ -423,17 +425,17 @@ const CSV_LIMIT = 20000;
 export default function activityRoutes() {
   const router = Router();
 
-  router.get("/api/activity", requireAuth, requireCap("activity.view"), (req, res) => {
+  router.get("/api/activity", requireAuth, requireCap("activity.view"), async (req, res) => {
     const db = req.ctx.db;
     const q = parse(activityQuery, req.query);
-    const { sql, params } = staffWhere(req, q);
+    const { sql, params } = await staffWhere(req, q);
 
     if (q.format === "csv") {
-      const rows = db.all(`SELECT ${ACTIVITY_COLUMNS} ${HISTORY_FROM} WHERE ${sql} ORDER BY a.created_at DESC, a.id DESC LIMIT ?`, [
+      const rows = await db.all(`SELECT ${ACTIVITY_COLUMNS} ${HISTORY_FROM} WHERE ${sql} ORDER BY a.created_at DESC, a.id DESC LIMIT ?`, [
         ...params,
         CSV_LIMIT,
       ]);
-      logActivity(req, {
+      await logActivity(req, {
         action: "activity.exported",
         entityType: "report",
         entityId: "activity",
@@ -463,48 +465,48 @@ export default function activityRoutes() {
     }
 
     const { page, pageSize, limit, offset } = paginate(req.query, { defaultSize: 50, max: 200 });
-    const total = db.get(`SELECT COUNT(*) AS n ${HISTORY_FROM} WHERE ${sql}`, params).n;
-    const rows = db.all(`SELECT ${ACTIVITY_COLUMNS} ${HISTORY_FROM} WHERE ${sql} ORDER BY a.created_at DESC, a.id DESC LIMIT ? OFFSET ?`, [
+    const total = (await db.get(`SELECT COUNT(*) AS n ${HISTORY_FROM} WHERE ${sql}`, params)).n;
+    const rows = await db.all(`SELECT ${ACTIVITY_COLUMNS} ${HISTORY_FROM} WHERE ${sql} ORDER BY a.created_at DESC, a.id DESC LIMIT ? OFFSET ?`, [
       ...params,
       limit,
       offset,
     ]);
-    res.json({ items: serializeActivities(req, rows), total, page, pageSize, hasMore: offset + rows.length < total });
+    res.json({ items: await serializeActivities(req, rows), total, page, pageSize, hasMore: offset + rows.length < total });
   });
 
   // What exists in the viewer's history, so filters never offer empty choices.
-  router.get("/api/activity/facets", requireAuth, requireCap("activity.view"), (req, res) => {
+  router.get("/api/activity/facets", requireAuth, requireCap("activity.view"), async (req, res) => {
     const db = req.ctx.db;
     const scope = historyScope(req);
     const clients = scopeSql.clients(req, "c");
     const brands = scopeSql.brands(req, "b");
     const projects = scopeSql.projects(req, "p");
     res.json({
-      actions: db
-        .all(`SELECT a.action, COUNT(*) AS n FROM ${HISTORY_SOURCE} a WHERE ${scope.sql} GROUP BY a.action ORDER BY a.action`, scope.params)
+      actions: (await db
+        .all(`SELECT a.action, COUNT(*) AS n FROM ${HISTORY_SOURCE} a WHERE ${scope.sql} GROUP BY a.action ORDER BY a.action`, scope.params))
         .map((row) => ({ action: row.action, count: row.n })),
-      entityTypes: db
-        .all(`SELECT a.entity_type, COUNT(*) AS n FROM ${HISTORY_SOURCE} a WHERE ${scope.sql} GROUP BY a.entity_type ORDER BY a.entity_type`, scope.params)
+      entityTypes: (await db
+        .all(`SELECT a.entity_type, COUNT(*) AS n FROM ${HISTORY_SOURCE} a WHERE ${scope.sql} GROUP BY a.entity_type ORDER BY a.entity_type`, scope.params))
         .map((row) => ({ entityType: row.entity_type, count: row.n })),
-      actors: db
+      actors: (await db
         .all(
           `SELECT u.id, u.name, u.role, COUNT(*) AS n FROM ${HISTORY_SOURCE} a JOIN users u ON u.id = a.actor_id
-            WHERE ${scope.sql} GROUP BY u.id ORDER BY u.name COLLATE NOCASE LIMIT 500`,
+            WHERE ${scope.sql} GROUP BY u.id ORDER BY u.name COLLATE utf8mb4_0900_ai_ci LIMIT 500`,
           scope.params,
-        )
+        ))
         .map((row) => ({ id: row.id, name: row.name, role: row.role, count: row.n })),
-      clients: db
-        .all(`SELECT c.id, c.name FROM clients c WHERE ${clients.sql} ORDER BY c.name COLLATE NOCASE`, clients.params)
+      clients: (await db
+        .all(`SELECT c.id, c.name FROM clients c WHERE ${clients.sql} ORDER BY c.name COLLATE utf8mb4_0900_ai_ci`, clients.params))
         .map((row) => ({ id: row.id, name: row.name })),
-      brands: db
-        .all(`SELECT b.id, b.name, b.client_id FROM brands b WHERE ${brands.sql} ORDER BY b.name COLLATE NOCASE`, brands.params)
+      brands: (await db
+        .all(`SELECT b.id, b.name, b.client_id FROM brands b WHERE ${brands.sql} ORDER BY b.name COLLATE utf8mb4_0900_ai_ci`, brands.params))
         .map((row) => ({ id: row.id, name: row.name, clientId: row.client_id })),
-      projects: db
+      projects: (await db
         .all(
           `SELECT p.id, p.name, p.brand_id, p.status FROM projects p WHERE ${projects.sql}
-            ORDER BY p.status = 'archived', p.name COLLATE NOCASE LIMIT 1000`,
+            ORDER BY p.status = 'archived', p.name COLLATE utf8mb4_0900_ai_ci LIMIT 1000`,
           projects.params,
-        )
+        ))
         .map((row) => ({ id: row.id, name: row.name, brandId: row.brand_id, status: row.status })),
     });
   });
@@ -516,14 +518,14 @@ export default function activityRoutes() {
     from: opt(schemas.date),
     to: opt(schemas.date),
   });
-  router.get("/api/portal/activity", requireAuth, requireCap("portal.access"), (req, res) => {
+  router.get("/api/portal/activity", requireAuth, requireCap("portal.access"), async (req, res) => {
     const db = req.ctx.db;
     const q = parse(portalQuery, req.query);
     const scope = activityScope(req);
     const where = [scope.sql];
     const params = [...scope.params];
     if (q.brandId) {
-      assertBrand(req, q.brandId);
+      await assertBrand(req, q.brandId);
       where.push("(a.brand_id = ? OR a.brand_id IS NULL)");
       params.push(q.brandId);
     }
@@ -535,13 +537,13 @@ export default function activityRoutes() {
     dateFilters(q, where, params);
     const { page, pageSize, limit, offset } = paginate(req.query, { defaultSize: 30, max: 100 });
     const whereSql = where.join(" AND ");
-    const total = db.get(`SELECT COUNT(*) AS n ${ACTIVITY_FROM} WHERE ${whereSql}`, params).n;
-    const rows = db.all(`SELECT ${ACTIVITY_COLUMNS} ${ACTIVITY_FROM} WHERE ${whereSql} ORDER BY a.created_at DESC, a.id DESC LIMIT ? OFFSET ?`, [
+    const total = (await db.get(`SELECT COUNT(*) AS n ${ACTIVITY_FROM} WHERE ${whereSql}`, params)).n;
+    const rows = await db.all(`SELECT ${ACTIVITY_COLUMNS} ${ACTIVITY_FROM} WHERE ${whereSql} ORDER BY a.created_at DESC, a.id DESC LIMIT ? OFFSET ?`, [
       ...params,
       limit,
       offset,
     ]);
-    res.json({ items: serializeActivities(req, rows), total, page, pageSize, hasMore: offset + rows.length < total });
+    res.json({ items: await serializeActivities(req, rows), total, page, pageSize, hasMore: offset + rows.length < total });
   });
 
   return router;

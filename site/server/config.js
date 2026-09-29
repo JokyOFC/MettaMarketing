@@ -12,6 +12,8 @@ const ENV_KEYS = {
   port: "PORT",
   host: "HOST",
   dataDir: "DATA_DIR",
+  databaseUrl: "DATABASE_URL",
+  dbPoolSize: "DB_POOL_SIZE",
   appUrl: "APP_URL",
   appSecret: "APP_SECRET",
   maxUploadMb: "MAX_UPLOAD_MB",
@@ -136,6 +138,13 @@ export function loadConfig(overrides = {}) {
   const dataDirRaw = blank(flat.dataDir) ? join(ROOT_DIR, "server", "data") : String(flat.dataDir);
   const dataDir = isAbsolute(dataDirRaw) ? dataDirRaw : resolve(ROOT_DIR, dataDirRaw);
 
+  // MySQL 8+: mysql://user:password@host:3306/database
+  const databaseUrl = blank(flat.databaseUrl) ? null : String(flat.databaseUrl).trim();
+  if (!databaseUrl)
+    throw new Error("DATABASE_URL is required (MySQL 8+), e.g. DATABASE_URL=mysql://metta:senha@127.0.0.1:3306/metta");
+  if (!/^mysql2?:\/\//.test(databaseUrl)) throw new Error("DATABASE_URL must start with mysql://");
+  const dbPoolSize = toInt(flat.dbPoolSize, 10, "DB_POOL_SIZE") || 10;
+
   let appUrl = blank(flat.appUrl)
     ? isProduction
       ? `http://${host}:${port}`
@@ -205,7 +214,8 @@ export function loadConfig(overrides = {}) {
     dataDir,
     storageDir: join(dataDir, "storage"),
     tmpDir: join(dataDir, "tmp"),
-    dbFile: overrides.dbFile ?? join(dataDir, "metta.db"),
+    databaseUrl,
+    dbPoolSize,
     appUrl,
     appSecret,
     maxUploadMb,

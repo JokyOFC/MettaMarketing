@@ -32,7 +32,7 @@ const escapeLike = (text) => String(text).replace(/[\\%_]/g, (c) => `\\${c}`);
  */
 export async function deliverInvite(req, user, { clientName = null } = {}) {
   const ctx = req.ctx;
-  const token = issueToken(ctx, user.id, "invite", INVITE_HOURS, req.user?.id ?? null);
+  const token = await issueToken(ctx, user.id, "invite", INVITE_HOURS, req.user?.id ?? null);
   const url = `${ctx.config.appUrl}/convite/${token}`;
   const inviter = req.user?.name ?? "A equipe Metta";
   const message =
@@ -72,11 +72,11 @@ export async function deliverInvite(req, user, { clientName = null } = {}) {
 }
 
 // Latest pending invitation of each user: Map<userId, {sentAt, expiresAt, expired}>.
-export function inviteInfo(db, userIds) {
+export async function inviteInfo(db, userIds) {
   const map = new Map();
   const ids = [...new Set(userIds)].filter(Boolean);
   if (!ids.length) return map;
-  const rows = db.all(
+  const rows = await db.all(
     `SELECT user_id, MAX(created_at) AS sent_at, MAX(expires_at) AS expires_at FROM auth_tokens
       WHERE purpose = 'invite' AND used_at IS NULL AND user_id IN (${placeholders(ids)})
       GROUP BY user_id`,
@@ -93,8 +93,8 @@ export function inviteInfo(db, userIds) {
 }
 
 // Guards resending: at most once a minute per person.
-export function assertResendAllowed(db, userId) {
-  const recent = db.get(
+export async function assertResendAllowed(db, userId) {
+  const recent = await db.get(
     "SELECT 1 AS yes FROM auth_tokens WHERE user_id = ? AND purpose = 'invite' AND created_at > ?",
     [userId, addMinutes(-1)],
   );
@@ -102,56 +102,56 @@ export function assertResendAllowed(db, userId) {
 }
 
 // Stops a user's access immediately (sessions and unused links).
-export function cutAccess(db, userId) {
-  revokeUserSessions(db, userId);
-  db.run("DELETE FROM auth_tokens WHERE user_id = ? AND used_at IS NULL", [userId]);
+export async function cutAccess(db, userId) {
+  await revokeUserSessions(db, userId);
+  await db.run("DELETE FROM auth_tokens WHERE user_id = ? AND used_at IS NULL", [userId]);
 }
 
 // Active administrators other than exceptId.
-function activeAdminCount(db, exceptId) {
-  return db.get("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND status = 'active' AND id != ?", [exceptId]).n;
+async function activeAdminCount(db, exceptId) {
+  return (await db.get("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND status = 'active' AND id != ?", [exceptId])).n;
 }
 
 // ------------------------------------------------------------------ serializers
 
-function staffAccess(req, rows) {
+async function staffAccess(req, rows) {
   const db = req.ctx.db;
   const ids = rows.map((row) => row.id);
   const out = new Map(ids.map((id) => [id, []]));
   if (!ids.length) return out;
-  const scope = getScope(req);
+  const scope = await getScope(req);
   const visible = (clientId) => scope.all || scope.clientIds?.has(clientId);
-  for (const row of db.all(
+  for (const row of await db.all(
     `SELECT a.user_id, c.id, c.name FROM staff_client_access a JOIN clients c ON c.id = a.client_id
-      WHERE a.user_id IN (${placeholders(ids)}) ORDER BY c.name COLLATE NOCASE`,
+      WHERE a.user_id IN (${placeholders(ids)}) ORDER BY c.name COLLATE utf8mb4_0900_ai_ci`,
     ids,
   ))
     if (visible(row.id)) out.get(row.user_id)?.push({ id: row.id, name: row.name });
   // designers reach clients through their projects
-  for (const row of db.all(
+  for (const row of await db.all(
     `SELECT DISTINCT pm.user_id, c.id, c.name FROM project_members pm
        JOIN projects p ON p.id = pm.project_id JOIN brands b ON b.id = p.brand_id
        JOIN clients c ON c.id = b.client_id JOIN users u ON u.id = pm.user_id
-      WHERE u.role = 'designer' AND pm.user_id IN (${placeholders(ids)}) ORDER BY c.name COLLATE NOCASE`,
+      WHERE u.role = 'designer' AND pm.user_id IN (${placeholders(ids)}) ORDER BY c.name COLLATE utf8mb4_0900_ai_ci`,
     ids,
   ))
     if (visible(row.id)) out.get(row.user_id)?.push({ id: row.id, name: row.name });
   return out;
 }
 
-export function serializeStaff(req, rows) {
+export async function serializeStaff(req, rows) {
   const db = req.ctx.db;
   const ids = rows.map((row) => row.id);
-  const clients = staffAccess(req, rows);
-  const invites = inviteInfo(db, ids.filter((id, i) => rows[i].status === "invited"));
+  const clients = await staffAccess(req, rows);
+  const invites = await inviteInfo(db, ids.filter((id, i) => rows[i].status === "invited"));
   const projectCounts = new Map(
     ids.length
-      ? db
+      ? (await db
           .all(
             `SELECT pm.user_id, COUNT(*) AS n FROM project_members pm JOIN projects p ON p.id = pm.project_id
               WHERE p.status NOT IN ('archived', 'delivered') AND pm.user_id IN (${placeholders(ids)}) GROUP BY pm.user_id`,
             ids,
-          )
+          ))
           .map((row) => [row.user_id, row.n])
       : [],
   );
@@ -187,31 +187,31 @@ const patchSchema = z
   .strict();
 const accessSchema = z.object({ clientIds: z.array(schemas.id).max(500) });
 
-function assertClientIds(db, ids) {
+async function assertClientIds(db, ids) {
   const unique = [...new Set(ids)];
   if (!unique.length) return unique;
-  const found = db.all(`SELECT id FROM clients WHERE id IN (${placeholders(unique)})`, unique);
+  const found = await db.all(`SELECT id FROM clients WHERE id IN (${placeholders(unique)})`, unique);
   if (found.length !== unique.length) throw validation({ clientIds: "Algum cliente selecionado não existe mais." });
   return unique;
 }
 
-function loadStaff(db, id) {
-  const row = id ? db.get("SELECT * FROM users WHERE id = ?", [id]) : null;
+async function loadStaff(db, id) {
+  const row = id ? await db.get("SELECT * FROM users WHERE id = ?", [id]) : null;
   if (!row || row.role === "client") throw notFound();
   return row;
 }
 
 // Replaces a manager's client access; returns { added, removed } client ids.
-export function replaceClientAccess(req, userId, clientIds) {
+export async function replaceClientAccess(req, userId, clientIds) {
   const db = req.ctx.db;
-  const current = db.all("SELECT client_id FROM staff_client_access WHERE user_id = ?", [userId]).map((r) => r.client_id);
+  const current = (await db.all("SELECT client_id FROM staff_client_access WHERE user_id = ?", [userId])).map((r) => r.client_id);
   const next = new Set(clientIds);
   const added = clientIds.filter((id) => !current.includes(id));
   const removed = current.filter((id) => !next.has(id));
   const at = now();
-  for (const id of removed) db.run("DELETE FROM staff_client_access WHERE user_id = ? AND client_id = ?", [userId, id]);
+  for (const id of removed) await db.run("DELETE FROM staff_client_access WHERE user_id = ? AND client_id = ?", [userId, id]);
   for (const id of added)
-    db.run("INSERT OR IGNORE INTO staff_client_access (user_id, client_id, granted_by, granted_at) VALUES (?, ?, ?, ?)", [
+    await db.run("INSERT IGNORE INTO staff_client_access (user_id, client_id, granted_by, granted_at) VALUES (?, ?, ?, ?)", [
       userId,
       id,
       req.user.id,
@@ -220,13 +220,13 @@ export function replaceClientAccess(req, userId, clientIds) {
   return { added, removed };
 }
 
-export function notifyAccessGranted(req, user, clientIds) {
+export async function notifyAccessGranted(req, user, clientIds) {
   if (!clientIds.length) return;
   const db = req.ctx.db;
-  const names = db
-    .all(`SELECT name FROM clients WHERE id IN (${placeholders(clientIds)}) ORDER BY name COLLATE NOCASE`, clientIds)
+  const names = (await db
+    .all(`SELECT name FROM clients WHERE id IN (${placeholders(clientIds)}) ORDER BY name COLLATE utf8mb4_0900_ai_ci`, clientIds))
     .map((row) => row.name);
-  notify(req, [user.id], {
+  await notify(req, [user.id], {
     type: "team.client_access",
     title: names.length === 1 ? `Acesso liberado: ${names[0]}` : `Acesso liberado a ${names.length} clientes`,
     body: names.length === 1 ? "Você agora gerencia este cliente, suas marcas e projetos." : names.join(", "),
@@ -242,7 +242,7 @@ export default function teamRoutes(ctx) {
   const router = Router();
   const { db } = ctx;
 
-  router.get("/api/team/users", requireCap("team.view"), (req, res) => {
+  router.get("/api/team/users", requireCap("team.view"), async (req, res) => {
     const where = ["u.role != 'client'"];
     const params = [];
     const role = typeof req.query.role === "string" ? req.query.role : "";
@@ -257,18 +257,18 @@ export default function teamRoutes(ctx) {
     }
     const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
     if (q) {
-      where.push("(u.name LIKE ? ESCAPE '\\' OR u.email LIKE ? ESCAPE '\\' OR u.job_title LIKE ? ESCAPE '\\')");
+      where.push("(u.name LIKE ? COLLATE utf8mb4_0900_ai_ci OR u.email LIKE ? COLLATE utf8mb4_0900_ai_ci OR u.job_title LIKE ? COLLATE utf8mb4_0900_ai_ci)");
       const like = `%${escapeLike(q)}%`;
       params.push(like, like, like);
     }
-    const rows = db.all(
+    const rows = await db.all(
       `SELECT u.* FROM users u WHERE ${where.join(" AND ")}
         ORDER BY u.status = 'disabled', CASE u.role WHEN 'admin' THEN 0 WHEN 'manager' THEN 1 WHEN 'designer' THEN 2 ELSE 3 END,
-                 u.name COLLATE NOCASE`,
+                 u.name COLLATE utf8mb4_0900_ai_ci`,
       params,
     );
     res.json({
-      items: serializeStaff(req, rows),
+      items: await serializeStaff(req, rows),
       total: rows.length,
       permissions: { canManage: can(req.user, "team.manage") },
       email: { configured: ctx.mailer.isConfigured() },
@@ -284,19 +284,19 @@ export default function teamRoutes(ctx) {
 
   router.post("/api/team/users", requireCap("team.manage"), async (req, res) => {
     const input = parse(inviteSchema, req.body);
-    if (db.get("SELECT id FROM users WHERE email = ?", [input.email]))
+    if (await db.get("SELECT id FROM users WHERE email = ?", [input.email]))
       throw validation({ email: "Já existe um acesso com este e-mail." });
-    const clientIds = input.role === "manager" ? assertClientIds(db, input.clientIds ?? []) : [];
+    const clientIds = input.role === "manager" ? await assertClientIds(db, input.clientIds ?? []) : [];
     const id = newId("usr");
     const at = now();
-    db.tx(() => {
-      db.run(
+    await db.tx(async () => {
+      await db.run(
         `INSERT INTO users (id, email, name, role, status, job_title, notify_email, created_by, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'invited', ?, ?, ?, ?, ?)`,
-        [id, input.email, input.name, input.role, input.jobTitle ?? null, getSetting(db, "defaultNotifyEmail") === false ? 0 : 1, req.user.id, at, at],
+        [id, input.email, input.name, input.role, input.jobTitle ?? null, await getSetting(db, "defaultNotifyEmail") === false ? 0 : 1, req.user.id, at, at],
       );
-      if (clientIds.length) replaceClientAccess(req, id, clientIds);
-      logActivity(req, {
+      if (clientIds.length) await replaceClientAccess(req, id, clientIds);
+      await logActivity(req, {
         action: "user.invited",
         entityType: "user",
         entityId: id,
@@ -304,13 +304,13 @@ export default function teamRoutes(ctx) {
         data: { role: input.role, clientIds },
       });
     });
-    const row = db.get("SELECT * FROM users WHERE id = ?", [id]);
+    const row = await db.get("SELECT * FROM users WHERE id = ?", [id]);
     const invite = await deliverInvite(req, row);
-    res.status(201).json({ user: serializeStaff(req, [db.get("SELECT * FROM users WHERE id = ?", [id])])[0], ...invite });
+    res.status(201).json({ user: (await serializeStaff(req, [await db.get("SELECT * FROM users WHERE id = ?", [id])]))[0], ...invite });
   });
 
-  router.patch("/api/team/users/:id", requireCap("team.manage"), (req, res) => {
-    const target = loadStaff(db, req.params.id);
+  router.patch("/api/team/users/:id", requireCap("team.manage"), async (req, res) => {
+    const target = await loadStaff(db, req.params.id);
     const input = parse(patchSchema, req.body);
     const self = target.id === req.user.id;
     const roleChange = input.role !== undefined && input.role !== target.role;
@@ -322,7 +322,7 @@ export default function teamRoutes(ctx) {
     if (self && (roleChange || (statusChange && nextStatus === "disabled")))
       throw conflict("Você não pode alterar o próprio papel nem desativar o próprio acesso.", "self_change");
     const losesAdmin = target.role === "admin" && target.status === "active" && (roleChange || nextStatus === "disabled");
-    if (losesAdmin && activeAdminCount(db, target.id) === 0)
+    if (losesAdmin && await activeAdminCount(db, target.id) === 0)
       throw conflict("É preciso manter pelo menos um administrador ativo.", "last_admin");
 
     const sets = [];
@@ -335,21 +335,21 @@ export default function teamRoutes(ctx) {
     if (input.jobTitle !== undefined && input.jobTitle !== target.job_title) set("job_title", input.jobTitle);
     if (roleChange) set("role", input.role);
     if (statusChange) set("status", nextStatus);
-    if (!sets.length) return res.json({ user: serializeStaff(req, [target])[0] });
+    if (!sets.length) return res.json({ user: (await serializeStaff(req, [target]))[0] });
 
-    db.tx(() => {
+    await db.tx(async () => {
       set("updated_at", now());
-      db.run(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`, [...params, target.id]);
-      if (statusChange && nextStatus === "disabled") cutAccess(db, target.id);
+      await db.run(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`, [...params, target.id]);
+      if (statusChange && nextStatus === "disabled") await cutAccess(db, target.id);
       // client access only means something for managers
-      if (roleChange && target.role === "manager") db.run("DELETE FROM staff_client_access WHERE user_id = ?", [target.id]);
+      if (roleChange && target.role === "manager") await db.run("DELETE FROM staff_client_access WHERE user_id = ?", [target.id]);
       const parts = [];
       if (roleChange) parts.push(`papel alterado de ${ROLE_LABELS[target.role]} para ${ROLE_LABELS[input.role]}`);
       if (statusChange)
         parts.push(nextStatus === "disabled" ? "acesso desativado" : nextStatus === "active" ? "acesso reativado" : "acesso reativado (convite pendente)");
       if (input.name !== undefined && input.name !== target.name) parts.push("nome atualizado");
       if (input.jobTitle !== undefined && input.jobTitle !== target.job_title) parts.push("cargo atualizado");
-      logActivity(req, {
+      await logActivity(req, {
         action: statusChange && nextStatus === "disabled" ? "user.disabled" : roleChange ? "user.role_changed" : "user.updated",
         entityType: "user",
         entityId: target.id,
@@ -357,42 +357,42 @@ export default function teamRoutes(ctx) {
         data: { role: roleChange ? { from: target.role, to: input.role } : undefined, status: statusChange ? { from: target.status, to: nextStatus } : undefined },
       });
     });
-    res.json({ user: serializeStaff(req, [db.get("SELECT * FROM users WHERE id = ?", [target.id])])[0] });
+    res.json({ user: (await serializeStaff(req, [await db.get("SELECT * FROM users WHERE id = ?", [target.id])]))[0] });
   });
 
-  router.put("/api/team/users/:id/clients", requireCap("team.manage"), (req, res) => {
-    const target = loadStaff(db, req.params.id);
+  router.put("/api/team/users/:id/clients", requireCap("team.manage"), async (req, res) => {
+    const target = await loadStaff(db, req.params.id);
     if (target.role !== "manager")
       throw validation({ clientIds: "Somente gestores recebem acesso por cliente. Designers acessam pelos projetos atribuídos." });
     const { clientIds: raw } = parse(accessSchema, req.body);
-    const clientIds = assertClientIds(db, raw);
+    const clientIds = await assertClientIds(db, raw);
     let change;
-    db.tx(() => {
-      change = replaceClientAccess(req, target.id, clientIds);
+    await db.tx(async () => {
+      change = await replaceClientAccess(req, target.id, clientIds);
       if (change.added.length || change.removed.length)
-        logActivity(req, {
+        await logActivity(req, {
           action: "user.client_access",
           entityType: "user",
           entityId: target.id,
           summary: `Acesso de ${target.name} atualizado: ${change.added.length} cliente(s) adicionado(s), ${change.removed.length} removido(s).`,
           data: change,
         });
-      if (target.status !== "disabled") notifyAccessGranted(req, target, change.added);
+      if (target.status !== "disabled") await notifyAccessGranted(req, target, change.added);
     });
-    res.json({ user: serializeStaff(req, [target])[0], ...change });
+    res.json({ user: (await serializeStaff(req, [target]))[0], ...change });
   });
 
   // Resend an invitation: staff needs team.manage; client users follow the
   // client's managers (clients.edit or brands.edit within scope).
   router.post("/api/users/:id/invite", requireAuth, async (req, res) => {
-    const target = req.params.id ? db.get("SELECT * FROM users WHERE id = ?", [req.params.id]) : null;
+    const target = req.params.id ? await db.get("SELECT * FROM users WHERE id = ?", [req.params.id]) : null;
     if (!target) throw notFound();
     let clientName = null;
     if (target.role === "client") {
       if (!can(req.user, "clients.edit") && !can(req.user, "brands.edit")) throw forbidden();
-      const scope = getScope(req);
+      const scope = await getScope(req);
       if (!(scope.all || (req.user.role === "manager" && scope.clientIds.has(target.client_id)))) throw notFound();
-      clientName = db.get("SELECT name FROM clients WHERE id = ?", [target.client_id])?.name ?? null;
+      clientName = (await db.get("SELECT name FROM clients WHERE id = ?", [target.client_id]))?.name ?? null;
     } else if (!can(req.user, "team.manage")) {
       throw can(req.user, "team.view") ? forbidden() : notFound();
     }
@@ -401,16 +401,16 @@ export default function teamRoutes(ctx) {
         target.status === "active" ? "Esta pessoa já ativou o acesso." : "Este acesso está desativado. Reative antes de reenviar o convite.",
         "not_invited",
       );
-    assertResendAllowed(db, target.id);
+    await assertResendAllowed(db, target.id);
     const invite = await deliverInvite(req, target, { clientName });
-    logActivity(req, {
+    await logActivity(req, {
       action: "user.invite_resent",
       entityType: "user",
       entityId: target.id,
       clientId: target.client_id ?? null,
       summary: `Convite reenviado para ${target.name}.`,
     });
-    res.json({ user: serializeUser(req, target), invite: inviteInfo(db, [target.id]).get(target.id) ?? null, ...invite });
+    res.json({ user: serializeUser(req, target), invite: (await inviteInfo(db, [target.id])).get(target.id) ?? null, ...invite });
   });
 
   return router;

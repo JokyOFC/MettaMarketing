@@ -54,8 +54,8 @@ function checkPassword(password, email, field = "password") {
   if (problem) throw validation({ [field]: problem });
 }
 
-function freshUser(db, id) {
-  return toRequestUser(db.get("SELECT * FROM users WHERE id = ?", [id]));
+async function freshUser(db, id) {
+  return toRequestUser(await db.get("SELECT * FROM users WHERE id = ?", [id]));
 }
 
 export default function authRoutes(ctx) {
@@ -66,69 +66,69 @@ export default function authRoutes(ctx) {
     const { email: rawEmail, password } = parse(loginSchema, req.body);
     const email = rawEmail.toLowerCase();
     const ip = clientIp(req);
-    assertLoginAllowed(db, email, ip);
+    await assertLoginAllowed(db, email, ip);
 
-    const user = db.get("SELECT * FROM users WHERE email = ?", [email]);
+    const user = await db.get("SELECT * FROM users WHERE email = ?", [email]);
     const ok = user?.password_hash ? await verifyPassword(password, user.password_hash) : await burnPasswordCheck(password);
     if (!ok || !user || user.status === "invited") {
-      recordLoginAttempt(db, email, ip, false);
+      await recordLoginAttempt(db, email, ip, false);
       throw new HttpError(401, "invalid_credentials", INVALID_CREDENTIALS);
     }
     if (user.status !== "active") {
-      recordLoginAttempt(db, email, ip, false);
+      await recordLoginAttempt(db, email, ip, false);
       throw forbidden("Seu acesso está desativado. Fale com a equipe Metta.");
     }
-    recordLoginAttempt(db, email, ip, true);
+    await recordLoginAttempt(db, email, ip, true);
     // a fresh session on every login (no fixation)
-    if (req.session) revokeSession(db, req.session.id);
+    if (req.session) await revokeSession(db, req.session.id);
     const at = now();
-    db.run("UPDATE users SET last_login_at = ? WHERE id = ?", [at, user.id]);
-    const session = createSession(ctx, user, req);
+    await db.run("UPDATE users SET last_login_at = ? WHERE id = ?", [at, user.id]);
+    const session = await createSession(ctx, user, req);
     req.user = toRequestUser({ ...user, last_login_at: at });
     req.session = { id: session.id };
-    res.json({ user: serializeMe(req, req.user) });
+    res.json({ user: await serializeMe(req, req.user) });
   });
 
-  router.post("/api/auth/logout", (req, res) => {
-    if (req.session) revokeSession(db, req.session.id);
+  router.post("/api/auth/logout", async (req, res) => {
+    if (req.session) await revokeSession(db, req.session.id);
     clearSessionCookie(res, ctx.config);
     res.status(204).end();
   });
 
-  router.get("/api/auth/me", requireAuth, (req, res) => {
-    res.json({ user: serializeMe(req, req.user) });
+  router.get("/api/auth/me", requireAuth, async (req, res) => {
+    res.json({ user: await serializeMe(req, req.user) });
   });
 
   // Validates an invitation or reset link before showing the form.
-  router.get("/api/auth/invite/:token", (req, res) => {
-    const found = peekToken(ctx, req.params.token);
+  router.get("/api/auth/invite/:token", async (req, res) => {
+    const found = await peekToken(ctx, req.params.token);
     if (!found) throw expired("Este link expirou ou já foi usado. Peça um novo à equipe Metta.");
     res.json({ email: found.user.email, name: found.user.name, purpose: found.token.purpose });
   });
 
   router.post("/api/auth/invite/accept", async (req, res) => {
     const input = parse(acceptSchema, req.body);
-    const found = peekToken(ctx, input.token, "invite");
+    const found = await peekToken(ctx, input.token, "invite");
     if (!found) throw expired("Este convite expirou ou já foi usado. Peça um novo à equipe Metta.");
     checkPassword(input.password, found.user.email);
     const hash = await hashPassword(input.password);
-    const user = consumeToken(ctx, input.token, "invite");
+    const user = await consumeToken(ctx, input.token, "invite");
     const at = now();
-    db.tx(() => {
-      db.run(
+    await db.tx(async () => {
+      await db.run(
         "UPDATE users SET password_hash = ?, status = 'active', name = COALESCE(?, name), last_login_at = ?, updated_at = ? WHERE id = ? AND status = 'invited'",
         [hash, input.name ?? null, at, at, user.id],
       );
-      db.run("DELETE FROM auth_tokens WHERE user_id = ? AND used_at IS NULL", [user.id]);
-      revokeUserSessions(db, user.id);
+      await db.run("DELETE FROM auth_tokens WHERE user_id = ? AND used_at IS NULL", [user.id]);
+      await revokeUserSessions(db, user.id);
     });
-    const active = freshUser(db, user.id);
+    const active = await freshUser(db, user.id);
     if (!active || active.status !== "active") throw expired("Este convite não pode mais ser usado.");
-    if (req.session) revokeSession(db, req.session.id);
-    const session = createSession(ctx, active, req);
+    if (req.session) await revokeSession(db, req.session.id);
+    const session = await createSession(ctx, active, req);
     req.user = active;
     req.session = { id: session.id };
-    logActivity(req, {
+    await logActivity(req, {
       action: "user.invite_accepted",
       entityType: "user",
       entityId: active.id,
@@ -136,19 +136,19 @@ export default function authRoutes(ctx) {
       summary: `${active.name} aceitou o convite e ativou o acesso.`,
       visibility: active.role === "client" ? "client" : "internal",
     });
-    res.json({ user: serializeMe(req, active) });
+    res.json({ user: await serializeMe(req, active) });
   });
 
   router.post("/api/auth/password/forgot", async (req, res) => {
     const { email } = parse(forgotSchema, req.body);
-    const user = email ? db.get("SELECT * FROM users WHERE email = ?", [email.toLowerCase()]) : null;
+    const user = email ? await db.get("SELECT * FROM users WHERE email = ?", [email.toLowerCase()]) : null;
     if (user && user.status === "active") {
-      const recent = db.get(
+      const recent = await db.get(
         "SELECT 1 AS yes FROM auth_tokens WHERE user_id = ? AND purpose = 'reset' AND created_at > ?",
         [user.id, addMinutes(-1)],
       );
       if (!recent) {
-        const token = issueToken(ctx, user.id, "reset", RESET_TTL_HOURS);
+        const token = await issueToken(ctx, user.id, "reset", RESET_TTL_HOURS);
         const message = renderEmail({
           title: "Redefinição de senha",
           intro: `Olá, ${user.name}. Recebemos um pedido para redefinir a senha do seu acesso à plataforma da Metta.`,
@@ -156,7 +156,8 @@ export default function authRoutes(ctx) {
           actionLabel: "Criar nova senha",
           actionUrl: `${ctx.config.appUrl}/redefinir-senha/${token}`,
         });
-        ctx.mailer.send({ to: user.email, toUserId: user.id, ...message }).catch(() => {});
+        // recorded before answering; the SMTP delivery does not delay the response
+        await ctx.mailer.enqueue({ to: user.email, toUserId: user.id, ...message });
       }
     }
     res.status(204).end();
@@ -164,17 +165,17 @@ export default function authRoutes(ctx) {
 
   router.post("/api/auth/password/reset", async (req, res) => {
     const input = parse(resetSchema, req.body);
-    const found = peekToken(ctx, input.token, "reset");
+    const found = await peekToken(ctx, input.token, "reset");
     if (!found) throw expired("Este link expirou ou já foi usado. Peça uma nova redefinição.");
     checkPassword(input.password, found.user.email);
     const hash = await hashPassword(input.password);
-    const user = consumeToken(ctx, input.token, "reset");
-    db.tx(() => {
-      db.run("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", [hash, now(), user.id]);
-      db.run("DELETE FROM auth_tokens WHERE user_id = ? AND purpose = 'reset' AND used_at IS NULL", [user.id]);
-      revokeUserSessions(db, user.id);
+    const user = await consumeToken(ctx, input.token, "reset");
+    await db.tx(async () => {
+      await db.run("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", [hash, now(), user.id]);
+      await db.run("DELETE FROM auth_tokens WHERE user_id = ? AND purpose = 'reset' AND used_at IS NULL", [user.id]);
+      await revokeUserSessions(db, user.id);
     });
-    logActivity(ctx, {
+    await logActivity(ctx, {
       actorId: user.id,
       actorRole: user.role,
       action: "user.password_reset",
@@ -188,21 +189,21 @@ export default function authRoutes(ctx) {
   router.post("/api/auth/password/change", requireAuth, async (req, res) => {
     const input = parse(changeSchema, req.body);
     const ip = clientIp(req);
-    const row = db.get("SELECT * FROM users WHERE id = ?", [req.user.id]);
-    assertLoginAllowed(db, row.email, ip);
+    const row = await db.get("SELECT * FROM users WHERE id = ?", [req.user.id]);
+    await assertLoginAllowed(db, row.email, ip);
     if (!(await verifyPassword(input.currentPassword, row.password_hash))) {
-      recordLoginAttempt(db, row.email, ip, false);
+      await recordLoginAttempt(db, row.email, ip, false);
       throw validation({ currentPassword: "Senha atual incorreta." });
     }
     checkPassword(input.newPassword, row.email, "newPassword");
     if (input.newPassword === input.currentPassword)
       throw validation({ newPassword: "Escolha uma senha diferente da atual." });
     const hash = await hashPassword(input.newPassword);
-    db.tx(() => {
-      db.run("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", [hash, now(), row.id]);
-      revokeUserSessions(db, row.id, { exceptId: req.session.id });
+    await db.tx(async () => {
+      await db.run("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", [hash, now(), row.id]);
+      await revokeUserSessions(db, row.id, { exceptId: req.session.id });
     });
-    logActivity(req, {
+    await logActivity(req, {
       action: "user.password_changed",
       entityType: "user",
       entityId: row.id,
@@ -211,7 +212,7 @@ export default function authRoutes(ctx) {
     res.status(204).end();
   });
 
-  router.patch("/api/auth/profile", requireAuth, (req, res) => {
+  router.patch("/api/auth/profile", requireAuth, async (req, res) => {
     const input = parse(profileSchema, req.body);
     const sets = [];
     const params = [];
@@ -225,14 +226,14 @@ export default function authRoutes(ctx) {
     if (input.notifyEmail !== undefined) set("notify_email", input.notifyEmail ? 1 : 0);
     if (sets.length) {
       set("updated_at", now());
-      db.run(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`, [...params, req.user.id]);
+      await db.run(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`, [...params, req.user.id]);
     }
-    req.user = freshUser(db, req.user.id);
-    res.json({ user: serializeMe(req, req.user) });
+    req.user = await freshUser(db, req.user.id);
+    res.json({ user: await serializeMe(req, req.user) });
   });
 
-  router.get("/api/auth/sessions", requireAuth, (req, res) => {
-    const rows = db.all(
+  router.get("/api/auth/sessions", requireAuth, async (req, res) => {
+    const rows = await db.all(
       `SELECT id, created_at, last_seen_at, user_agent, ip FROM sessions
         WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ?
         ORDER BY last_seen_at DESC`,
@@ -250,13 +251,13 @@ export default function authRoutes(ctx) {
     });
   });
 
-  router.delete("/api/auth/sessions/:id", requireAuth, (req, res) => {
-    const row = db.get("SELECT id FROM sessions WHERE id = ? AND user_id = ? AND revoked_at IS NULL", [
+  router.delete("/api/auth/sessions/:id", requireAuth, async (req, res) => {
+    const row = await db.get("SELECT id FROM sessions WHERE id = ? AND user_id = ? AND revoked_at IS NULL", [
       req.params.id,
       req.user.id,
     ]);
     if (!row) throw notFound();
-    revokeSession(db, row.id);
+    await revokeSession(db, row.id);
     if (row.id === req.session.id) clearSessionCookie(res, ctx.config);
     res.status(204).end();
   });

@@ -21,11 +21,11 @@ const f = {};
 before(async () => {
   server = await startTestServer();
   ctx = server.ctx;
-  const clientA = createClientWithBrand(ctx, { name: "Cliente A", brandName: "Marca A" });
-  const clientB = createClientWithBrand(ctx, { name: "Cliente B", brandName: "Marca B" });
+  const clientA = await createClientWithBrand(ctx, { name: "Cliente A", brandName: "Marca A" });
+  const clientB = await createClientWithBrand(ctx, { name: "Cliente B", brandName: "Marca B" });
   f.clientA = clientA.clientId;
   f.brandA = clientA.brandId;
-  f.brandA2 = createBrand(ctx, clientA.clientId, "Marca A2").id;
+  f.brandA2 = (await createBrand(ctx, clientA.clientId, "Marca A2")).id;
   f.brandB = clientB.brandId;
 
   u.admin = await createUser(ctx, { role: "admin", name: "Admin" });
@@ -37,10 +37,10 @@ before(async () => {
   u.clientA = await createUser(ctx, { role: "client", clientId: clientA.clientId, name: "Ana Cliente" });
   u.clientA2 = await createUser(ctx, { role: "client", clientId: clientA.clientId, name: "Bruno Cliente" });
   u.clientB = await createUser(ctx, { role: "client", clientId: clientB.clientId, name: "Carla B" });
-  addStaffAccess(ctx, u.managerA.id, clientA.clientId);
+  await addStaffAccess(ctx, u.managerA.id, clientA.clientId);
 
-  f.projectA = createProject(ctx, { brandId: f.brandA, name: "Identidade A", memberIds: [u.designer.id] }).id;
-  f.projectB = createProject(ctx, { brandId: f.brandB, name: "Projeto B" }).id;
+  f.projectA = (await createProject(ctx, { brandId: f.brandA, name: "Identidade A", memberIds: [u.designer.id] })).id;
+  f.projectB = (await createProject(ctx, { brandId: f.brandB, name: "Projeto B" })).id;
 
   for (const key of Object.keys(u)) a[key] = await login(server, { email: u[key].email });
 });
@@ -226,18 +226,18 @@ describe("sending and client visibility", () => {
     assert.equal(res.body.emailRecipients, 2);
 
     for (const user of [u.clientA, u.clientA2]) {
-      const row = ctx.db.get("SELECT * FROM notifications WHERE user_id = ? AND entity_id = ?", [user.id, briefing.id]);
+      const row = await ctx.db.get("SELECT * FROM notifications WHERE user_id = ? AND entity_id = ?", [user.id, briefing.id]);
       assert.equal(row.type, "briefing.sent");
       assert.equal(row.link, `/painel/briefings/${briefing.id}`);
       assert.match(row.body, /20\/11\/2026/);
     }
-    assert.equal(ctx.db.get("SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND entity_id = ?", [u.clientB.id, briefing.id]).n, 0);
+    assert.equal((await ctx.db.get("SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND entity_id = ?", [u.clientB.id, briefing.id])).n, 0);
     await ctx.mailer.idle();
-    const mail = ctx.db.get("SELECT * FROM email_outbox WHERE to_email = ? AND subject LIKE ?", [u.clientA.email, "%Briefing enviado%"]);
+    const mail = await ctx.db.get("SELECT * FROM email_outbox WHERE to_email = ? AND subject LIKE ?", [u.clientA.email, "%Briefing enviado%"]);
     assert.ok(mail, "e-mail recorded in the outbox");
     assert.match(mail.text_body, new RegExp(`/painel/briefings/${briefing.id}`));
 
-    const activity = ctx.db.get("SELECT * FROM activity_log WHERE entity_id = ? AND action = 'briefing.sent'", [briefing.id]);
+    const activity = await ctx.db.get("SELECT * FROM activity_log WHERE entity_id = ? AND action = 'briefing.sent'", [briefing.id]);
     assert.equal(activity.visibility, "client");
     assert.equal(activity.client_id, f.clientA);
 
@@ -250,7 +250,7 @@ describe("sending and client visibility", () => {
   test("send reports who gets the e-mail: SMTP configured and e-mail notices on", async () => {
     const briefing = await newBriefing(a.managerA, { title: "Alcance do aviso" });
     const configured = ctx.mailer.isConfigured;
-    ctx.db.run("UPDATE users SET notify_email = 0 WHERE id = ?", [u.clientA2.id]);
+    await ctx.db.run("UPDATE users SET notify_email = 0 WHERE id = ?", [u.clientA2.id]);
     try {
       ctx.mailer.isConfigured = () => true;
       const res = await a.managerA.post(`/api/briefings/${briefing.id}/send`);
@@ -261,7 +261,7 @@ describe("sending and client visibility", () => {
       assert.equal(res.body.emailRecipients, 1);
     } finally {
       ctx.mailer.isConfigured = configured;
-      ctx.db.run("UPDATE users SET notify_email = 1 WHERE id = ?", [u.clientA2.id]);
+      await ctx.db.run("UPDATE users SET notify_email = 1 WHERE id = ?", [u.clientA2.id]);
     }
   });
 
@@ -336,7 +336,7 @@ describe("client answers", () => {
     assert.equal(res.status, 422);
     assert.equal(res.body.error.fields[`answers.${ids["Tom de voz"]}`], "Responda esta pergunta.");
     assert.ok(res.body.error.fields[`answers.${ids["Site atual"]}`]);
-    assert.equal(ctx.db.get("SELECT status FROM briefings WHERE id = ?", [briefing.id]).status, "awaiting_client");
+    assert.equal((await ctx.db.get("SELECT status FROM briefings WHERE id = ?", [briefing.id])).status, "awaiting_client");
 
     res = await a.clientA.put(`/api/briefings/${briefing.id}/answers`, {
       answers: {
@@ -356,13 +356,13 @@ describe("client answers", () => {
     assert.ok(done.submittedAt);
     assert.equal(done.permissions.canAnswer, false);
 
-    const note = ctx.db.get("SELECT * FROM notifications WHERE user_id = ? AND entity_id = ? AND type = 'briefing.submitted'", [
+    const note = await ctx.db.get("SELECT * FROM notifications WHERE user_id = ? AND entity_id = ? AND type = 'briefing.submitted'", [
       u.managerA.id,
       briefing.id,
     ]);
     assert.ok(note, "the manager of the client is notified");
     assert.equal(note.link, `/admin/briefings/${briefing.id}`);
-    const activity = ctx.db.get("SELECT * FROM activity_log WHERE entity_id = ? AND action = 'briefing.submitted'", [briefing.id]);
+    const activity = await ctx.db.get("SELECT * FROM activity_log WHERE entity_id = ? AND action = 'briefing.submitted'", [briefing.id]);
     assert.equal(activity.visibility, "client");
 
     // closed for the client and locked for question edits
@@ -395,7 +395,7 @@ describe("client answers", () => {
     assert.equal(reopened.body.briefing.status, "in_progress");
     assert.equal(reopened.body.briefing.submittedAt, null);
     assert.equal(reopened.body.briefing.answers[ids["Tom de voz"]], "Formal");
-    const note = ctx.db.get("SELECT * FROM notifications WHERE user_id = ? AND entity_id = ? AND type = 'briefing.reopened'", [
+    const note = await ctx.db.get("SELECT * FROM notifications WHERE user_id = ? AND entity_id = ? AND type = 'briefing.reopened'", [
       u.clientA.id,
       briefing.id,
     ]);

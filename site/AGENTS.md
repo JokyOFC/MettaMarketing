@@ -11,6 +11,7 @@ Antes de alterar a interface, leia `DESIGN_SYSTEM.md`.
 - Arquivos ficam em armazenamento privado e só saem por link temporário, com autorização verificada a cada prévia, download e ZIP. Download nunca conta como aprovação.
 - Nunca persistir senhas em texto (hash scrypt) nem inventar números: telas de dados mostram só o que existe no banco.
 - Contas de desenvolvimento ficam em `server/scripts/seed-dev.js` e nunca rodam em produção.
+- O banco é MySQL 8.0.23+ (`DATABASE_URL` no `.env`; regras em `docs/PLATFORM.md` §4.1): todo acesso é `await db.*`, transações com `db.tx(async () => …)`, nada de sintaxe exclusiva do SQLite.
 - Conclua com `npm test`, `npm run build` e, para fluxos de interface, `node e2e/flows.mjs` (desktop e `--mobile`) com os servidores de desenvolvimento no ar.
 - Respeite mobile, teclado e `prefers-reduced-motion`.
 - Teste os fluxos modificados e conclua com `npm run build`.

@@ -69,20 +69,20 @@ const sortFormats = (formats) =>
 const placeholders = (list) => list.map(() => "?").join(", ");
 
 // Runs `SELECT … WHERE column IN (…)` in chunks.
-function selectIn(db, sql, ids, extra = []) {
+async function selectIn(db, sql, ids, extra = []) {
   const unique = [...new Set(ids.filter(Boolean))];
   const out = [];
   for (let i = 0; i < unique.length; i += 500) {
     const chunk = unique.slice(i, i + 500);
-    out.push(...db.all(sql.replace("(?)", `(${placeholders(chunk)})`), [...chunk, ...extra]));
+    out.push(...await db.all(sql.replace("(?)", `(${placeholders(chunk)})`), [...chunk, ...extra]));
   }
   return out;
 }
 
 // Map<fileId, { thumb, preview, poster }> with rendition rows (no storage keys leave the server).
-export function loadRenditions(db, fileIds) {
+export async function loadRenditions(db, fileIds) {
   const map = new Map();
-  for (const row of selectIn(db, "SELECT file_id, kind, mime, width, height, size_bytes FROM file_renditions WHERE file_id IN (?)", fileIds)) {
+  for (const row of await selectIn(db, "SELECT file_id, kind, mime, width, height, size_bytes FROM file_renditions WHERE file_id IN (?)", fileIds)) {
     if (!map.has(row.file_id)) map.set(row.file_id, {});
     map.get(row.file_id)[row.kind] = row;
   }
@@ -150,8 +150,8 @@ export function clientVisibleFiles(materialRow, fileRows) {
 }
 
 // File rows of a version the viewer may see, ordered by role then position.
-export function visibleFilesForVersion(req, materialRow, versionId) {
-  const rows = req.ctx.db.all("SELECT * FROM material_files WHERE version_id = ? AND material_id = ?", [
+export async function visibleFilesForVersion(req, materialRow, versionId) {
+  const rows = await req.ctx.db.all("SELECT * FROM material_files WHERE version_id = ? AND material_id = ?", [
     versionId,
     materialRow.id,
   ]);
@@ -175,21 +175,21 @@ const VERSION_SELECT = `SELECT v.*, cu.name AS created_by_name, cu.role AS creat
  * (see visibleFilesForVersion); renditions: Map<fileId, {thumb, preview, poster}>.
  * materialRow is needed for download rules (falls back to a lookup).
  */
-export function serializeVersion(req, versionRow, files, renditions, materialRow) {
+export async function serializeVersion(req, versionRow, files, renditions, materialRow) {
   const db = req.ctx.db;
   const material =
-    materialRow ?? versionRow.material ?? db.get("SELECT m.*, b.client_id AS client_id FROM materials m JOIN brands b ON b.id = m.brand_id WHERE m.id = ?", [versionRow.material_id]);
+    materialRow ?? versionRow.material ?? await db.get("SELECT m.*, b.client_id AS client_id FROM materials m JOIN brands b ON b.id = m.brand_id WHERE m.id = ?", [versionRow.material_id]);
   let createdBy = versionRow.created_by_name !== undefined
     ? { id: versionRow.created_by, name: versionRow.created_by_name, role: versionRow.created_by_role }
-    : db.get("SELECT id, name, role FROM users WHERE id = ?", [versionRow.created_by]);
+    : await db.get("SELECT id, name, role FROM users WHERE id = ?", [versionRow.created_by]);
   let decidedBy = null;
   if (versionRow.decided_by) {
     decidedBy = versionRow.decided_by_name !== undefined
       ? { id: versionRow.decided_by, name: versionRow.decided_by_name, role: versionRow.decided_by_role }
-      : db.get("SELECT id, name, role FROM users WHERE id = ?", [versionRow.decided_by]);
+      : await db.get("SELECT id, name, role FROM users WHERE id = ?", [versionRow.decided_by]);
   }
-  const fileRows = sortFiles(files ?? visibleFilesForVersion(req, material, versionRow.id));
-  const renditionMap = renditions ?? loadRenditions(db, fileRows.map((f) => f.id));
+  const fileRows = sortFiles(files ?? await visibleFilesForVersion(req, material, versionRow.id));
+  const renditionMap = renditions ?? await loadRenditions(db, fileRows.map((f) => f.id));
   return {
     id: versionRow.id,
     materialId: versionRow.material_id,
@@ -255,20 +255,20 @@ function serializePost(row) {
  * (staff: current version; client: latest released version), thumbnail,
  * real formats and file counts of that version.
  */
-export function serializeMaterials(req, rows) {
+export async function serializeMaterials(req, rows) {
   if (!rows.length) return [];
   const db = req.ctx.db;
   const staff = isStaff(req);
   const versionIdOf = (row) => (staff ? row.current_version_id ?? row.released_version_id : row.released_version_id);
 
   const versions = new Map(
-    selectIn(db, "SELECT id, material_id, number, status, released_at, created_at FROM material_versions WHERE id IN (?)", rows.map(versionIdOf)).map(
+    (await selectIn(db, "SELECT id, material_id, number, status, released_at, created_at FROM material_versions WHERE id IN (?)", rows.map(versionIdOf))).map(
       (v) => [v.id, v],
     ),
   );
   const filesByVersion = new Map();
   const rowById = new Map(rows.map((row) => [row.id, row]));
-  for (const file of selectIn(db, "SELECT * FROM material_files WHERE version_id IN (?)", [...versions.keys()])) {
+  for (const file of await selectIn(db, "SELECT * FROM material_files WHERE version_id IN (?)", [...versions.keys()])) {
     const material = rowById.get(file.material_id);
     if (!material) continue;
     if (!staff && !clientCanSeeFile(file, material)) continue;
@@ -276,7 +276,7 @@ export function serializeMaterials(req, rows) {
     filesByVersion.get(file.version_id).push(file);
   }
   const allFiles = [...filesByVersion.values()].flat();
-  const renditions = loadRenditions(db, allFiles.map((f) => f.id));
+  const renditions = await loadRenditions(db, allFiles.map((f) => f.id));
 
   return rows.map((row) => {
     const version = versions.get(versionIdOf(row)) ?? null;
@@ -340,7 +340,7 @@ const SORTS = {
   created: "m.created_at DESC",
   due: "COALESCE(pd.planned_date, m.due_date) IS NULL, COALESCE(pd.planned_date, m.due_date), pd.planned_time, m.created_at",
   planned: "pd.planned_date IS NULL, pd.planned_date, pd.planned_time, m.sort_order",
-  title: "m.title COLLATE NOCASE",
+  title: "m.title COLLATE utf8mb4_0900_ai_ci",
   released: "m.released_at IS NULL, m.released_at DESC",
 };
 
@@ -356,7 +356,7 @@ const escapeLike = (text) => String(text).replace(/[\\%_]/g, (c) => `\\${c}`);
  * List filters accept arrays or comma-separated strings. Without pageSize
  * every match is returned.
  */
-export function listMaterials(req, filters = {}, { page, pageSize } = {}) {
+export async function listMaterials(req, filters = {}, { page, pageSize } = {}) {
   const db = req.ctx.db;
   const staff = isStaff(req);
   const scope = scopeSql.materials(req, "m", "b");
@@ -401,13 +401,13 @@ export function listMaterials(req, filters = {}, { page, pageSize } = {}) {
     params.push(filters.to);
   }
   if (filters.tag) {
-    where.push("EXISTS (SELECT 1 FROM json_each(m.tags) t WHERE t.value = ?)");
+    where.push("JSON_CONTAINS(m.tags, JSON_QUOTE(?))");
     params.push(String(filters.tag));
   }
   if (filters.q && String(filters.q).trim()) {
     const like = `%${escapeLike(String(filters.q).trim())}%`;
     where.push(
-      "(m.title LIKE ? ESCAPE '\\' OR IFNULL(m.description, '') LIKE ? ESCAPE '\\' OR m.tags LIKE ? ESCAPE '\\' OR IFNULL(cmp.name, '') LIKE ? ESCAPE '\\')",
+      "(m.title LIKE ? COLLATE utf8mb4_0900_ai_ci OR IFNULL(m.description, '') LIKE ? COLLATE utf8mb4_0900_ai_ci OR m.tags LIKE ? COLLATE utf8mb4_0900_ai_ci OR IFNULL(cmp.name, '') LIKE ? COLLATE utf8mb4_0900_ai_ci)",
     );
     params.push(like, like, like, like);
   }
@@ -423,7 +423,7 @@ export function listMaterials(req, filters = {}, { page, pageSize } = {}) {
   }
 
   const whereSql = `WHERE ${where.join(" AND ")}`;
-  const total = db.get(`SELECT COUNT(*) AS n ${MATERIAL_FROM} ${whereSql}`, params).n;
+  const total = (await db.get(`SELECT COUNT(*) AS n ${MATERIAL_FROM} ${whereSql}`, params)).n;
   const order = SORTS[filters.sort] ?? SORTS.sortOrder;
   let sql = `${MATERIAL_SELECT} ${whereSql} ORDER BY ${order}, m.id`;
   const listParams = [...params];
@@ -433,41 +433,41 @@ export function listMaterials(req, filters = {}, { page, pageSize } = {}) {
     sql += " LIMIT ? OFFSET ?";
     listParams.push(size, offset);
   }
-  const rows = db.all(sql, listParams);
-  return { items: serializeMaterials(req, rows), total };
+  const rows = await db.all(sql, listParams);
+  return { items: await serializeMaterials(req, rows), total };
 }
 
 // Loads full MATERIAL_SELECT rows by id (no access check — use after assert*).
-export function loadMaterialRows(db, ids) {
-  return selectIn(db, `${MATERIAL_SELECT} WHERE m.id IN (?)`, ids);
+export async function loadMaterialRows(db, ids) {
+  return await selectIn(db, `${MATERIAL_SELECT} WHERE m.id IN (?)`, ids);
 }
 
 // MaterialDetail = Material & { versions, permissions }
-export function getMaterialDetail(req, id) {
+export async function getMaterialDetail(req, id) {
   const db = req.ctx.db;
-  assertMaterial(req, id);
-  const row = db.get(`${MATERIAL_SELECT} WHERE m.id = ?`, [id]);
+  await assertMaterial(req, id);
+  const row = await db.get(`${MATERIAL_SELECT} WHERE m.id = ?`, [id]);
   if (!row) throw notFound();
-  const [material] = serializeMaterials(req, [row]);
+  const [material] = await serializeMaterials(req, [row]);
   const staff = isStaff(req);
   const client = req.user.role === "client";
 
-  const versionRows = db.all(
+  const versionRows = await db.all(
     `${VERSION_SELECT} WHERE v.material_id = ? ${client ? "AND v.released_at IS NOT NULL" : ""} ORDER BY v.number DESC`,
     [id],
   );
-  const fileRows = db.all("SELECT * FROM material_files WHERE material_id = ?", [id]).filter(
+  const fileRows = (await db.all("SELECT * FROM material_files WHERE material_id = ?", [id])).filter(
     (file) => !client || clientCanSeeFile(file, row),
   );
-  const renditions = loadRenditions(db, fileRows.map((f) => f.id));
+  const renditions = await loadRenditions(db, fileRows.map((f) => f.id));
   const byVersion = new Map();
   for (const file of fileRows) {
     if (!byVersion.has(file.version_id)) byVersion.set(file.version_id, []);
     byVersion.get(file.version_id).push(file);
   }
-  material.versions = versionRows.map((v) => serializeVersion(req, v, byVersion.get(v.id) ?? [], renditions, row));
+  material.versions = await Promise.all(versionRows.map((v) => serializeVersion(req, v, byVersion.get(v.id) ?? [], renditions, row)));
 
-  const writable = staff && canWriteMaterial(req, row);
+  const writable = staff && await canWriteMaterial(req, row);
   const active = !row.archived_at;
   const releasable = staff && active && writable && can(req.user, "materials.release");
   if (staff) {
@@ -510,11 +510,11 @@ const FILE_ROLES = new Set(["original", "final", "editable", "cover"]);
 
 const text = (value) => (value === undefined || value === null ? null : String(value).trim() || null);
 
-function resolveCategory(db, input) {
+async function resolveCategory(db, input) {
   const row = input.categoryId
-    ? db.get("SELECT * FROM categories WHERE id = ?", [input.categoryId])
+    ? await db.get("SELECT * FROM categories WHERE id = ?", [input.categoryId])
     : input.categorySlug
-      ? db.get("SELECT * FROM categories WHERE slug = ?", [input.categorySlug])
+      ? await db.get("SELECT * FROM categories WHERE slug = ?", [input.categorySlug])
       : null;
   if (!row || row.archived_at) throw validation({ categoryId: "Escolha uma categoria ativa." });
   return row;
@@ -530,22 +530,22 @@ export const OWNER_OUT_OF_SCOPE = "Escolha alguém da equipe com acesso a este c
  * or a designer who is a member of a project of the material's brand.
  * Anybody else -> 422 on `field`.
  */
-export function assertAssignableOwner(req, target, userId, field = "ownerId") {
+export async function assertAssignableOwner(req, target, userId, field = "ownerId") {
   const { db } = req.ctx;
   const clientId = target?.clientId ?? target?.client_id ?? null;
   const brandId = target?.brandId ?? target?.brand_id ?? null;
   const user = userId
-    ? db.get("SELECT id, name, role FROM users WHERE id = ? AND role != 'client' AND status = 'active'", [userId])
+    ? await db.get("SELECT id, name, role FROM users WHERE id = ? AND role != 'client' AND status = 'active'", [userId])
     : null;
   if (!user) throw validation({ [field]: "Escolha alguém da equipe." });
   let allowed = false;
   if (user.role === "admin") allowed = true;
   else if (user.role === "manager")
-    allowed = Boolean(clientId && db.get("SELECT 1 FROM staff_client_access WHERE user_id = ? AND client_id = ?", [user.id, clientId]));
+    allowed = Boolean(clientId && await db.get("SELECT 1 FROM staff_client_access WHERE user_id = ? AND client_id = ?", [user.id, clientId]));
   else if (user.role === "designer")
     allowed = Boolean(
       brandId &&
-        db.get(
+        await db.get(
           `SELECT 1 FROM project_members pm JOIN projects p ON p.id = pm.project_id
             WHERE pm.user_id = ? AND p.brand_id = ? LIMIT 1`,
           [user.id, brandId],
@@ -560,26 +560,26 @@ export function assertAssignableOwner(req, target, userId, field = "ownerId") {
  * (visibility 'draft'), post_details when kind = 'post', version 1 'draft'
  * and attaches the uploads. Designers must use a project they belong to.
  */
-export function createMaterial(req, input) {
+export async function createMaterial(req, input) {
   const { db } = req.ctx;
   const user = req.user;
   const kind = input.kind === "post" ? "post" : "asset";
-  const brand = assertBrand(req, input.brandId);
+  const brand = await assertBrand(req, input.brandId);
   if (brand.status !== "active") throw validation({ brandId: "Esta marca está arquivada." });
 
   let project = null;
   if (input.projectId) {
-    project = assertProject(req, input.projectId);
+    project = await assertProject(req, input.projectId);
     if (project.brand_id !== brand.id) throw validation({ projectId: "O projeto precisa ser da mesma marca." });
   } else if (user.role === "designer") {
     throw validation({ projectId: "Selecione um dos seus projetos." });
   }
-  const category = resolveCategory(db, input);
+  const category = await resolveCategory(db, input);
   const title = text(input.title);
   if (!title) throw validation({ title: "Dê um título ao material." });
   const ownerId = input.ownerId ?? user.id;
   if (input.ownerId && input.ownerId !== user.id)
-    assertAssignableOwner(req, { clientId: brand.client_id, brandId: brand.id }, ownerId);
+    await assertAssignableOwner(req, { clientId: brand.client_id, brandId: brand.id }, ownerId);
   if (input.variant && !VARIANTS.has(input.variant)) throw validation({ variant: "Variação inválida." });
   if (input.previewBg && !PREVIEW_BGS.has(input.previewBg)) throw validation({ previewBg: "Fundo inválido." });
 
@@ -597,7 +597,7 @@ export function createMaterial(req, input) {
     if (!NETWORKS.has(post.network)) fields.network = "Escolha a rede social.";
     if (!POST_FORMATS.has(post.format)) fields.format = "Escolha o formato.";
     if (post.campaignId) {
-      const campaign = db.get("SELECT brand_id FROM campaigns WHERE id = ?", [post.campaignId]);
+      const campaign = await db.get("SELECT brand_id FROM campaigns WHERE id = ?", [post.campaignId]);
       if (!campaign || campaign.brand_id !== brand.id) fields.campaignId = "Campanha não encontrada nesta marca.";
     }
     if (Object.keys(fields).length) throw validation(fields);
@@ -610,10 +610,10 @@ export function createMaterial(req, input) {
     input.editableIncluded === undefined ? (project ? project.includes_editables : 0) : input.editableIncluded ? 1 : 0;
   const nextSort =
     input.sortOrder ??
-    (db.get("SELECT MAX(sort_order) AS n FROM materials WHERE brand_id = ? AND category_id = ?", [brand.id, category.id])?.n ?? 0) + 10;
+    ((await db.get("SELECT MAX(sort_order) AS n FROM materials WHERE brand_id = ? AND category_id = ?", [brand.id, category.id]))?.n ?? 0) + 10;
 
-  db.tx(() => {
-    db.run(
+  await db.tx(async () => {
+    await db.run(
       `INSERT INTO materials (id, kind, brand_id, project_id, category_id, title, description, tags, owner_id,
          variant, preview_bg, sort_order, visibility, download_enabled, editable_included, requires_approval,
          approval_status, current_version_id, due_date, internal_notes, created_by, created_at, updated_at)
@@ -642,20 +642,20 @@ export function createMaterial(req, input) {
       ],
     );
     if (post) {
-      db.run(
+      await db.run(
         `INSERT INTO post_details (material_id, campaign_id, network, format, planned_date, planned_time)
          VALUES (?, ?, ?, ?, ?, ?)`,
         [id, post.campaignId, post.network, post.format, post.plannedDate, post.plannedTime],
       );
     }
-    db.run(
+    await db.run(
       `INSERT INTO material_versions (id, material_id, number, status, caption, hashtags, notes, change_summary, created_by, created_at)
        VALUES (?, ?, 1, 'draft', ?, ?, ?, ?, ?, ?)`,
       [versionId, id, text(input.caption), text(input.hashtags), text(input.notes), text(input.changeSummary), user.id, at],
     );
-    db.run("UPDATE materials SET current_version_id = ? WHERE id = ?", [versionId, id]);
-    if (input.files?.length) attachUploads(req, { materialId: id, versionId, files: input.files });
-    logActivity(req, {
+    await db.run("UPDATE materials SET current_version_id = ? WHERE id = ?", [versionId, id]);
+    if (input.files?.length) await attachUploads(req, { materialId: id, versionId, files: input.files });
+    await logActivity(req, {
       action: "material.created",
       entityType: "material",
       entityId: id,
@@ -677,21 +677,21 @@ export function createMaterial(req, input) {
  * copies the current version's originals, editables and cover — never its
  * final files. Refused (409) while the current version was never released.
  */
-export function createVersion(req, materialId, input = {}) {
+export async function createVersion(req, materialId, input = {}) {
   const { db } = req.ctx;
-  const material = assertMaterial(req, materialId, { write: true });
+  const material = await assertMaterial(req, materialId, { write: true });
   if (material.archived_at) throw conflict("Material arquivado. Desarquive para enviar uma nova versão.");
   const current = material.current_version_id
-    ? db.get("SELECT * FROM material_versions WHERE id = ?", [material.current_version_id])
+    ? await db.get("SELECT * FROM material_versions WHERE id = ?", [material.current_version_id])
     : null;
   if (current && (current.status === "draft" || current.status === "internal_review"))
     throw conflict("A versão atual ainda não foi liberada. Atualize os arquivos dela antes de criar outra.");
 
   const versionId = newId("ver");
   const at = now();
-  db.tx(() => {
-    const number = (db.get("SELECT MAX(number) AS n FROM material_versions WHERE material_id = ?", [material.id])?.n ?? 0) + 1;
-    db.run(
+  await db.tx(async () => {
+    const number = ((await db.get("SELECT MAX(number) AS n FROM material_versions WHERE material_id = ?", [material.id]))?.n ?? 0) + 1;
+    await db.run(
       `INSERT INTO material_versions (id, material_id, number, status, caption, hashtags, notes, change_summary, created_by, created_at)
        VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)`,
       [
@@ -710,11 +710,11 @@ export function createVersion(req, materialId, input = {}) {
       // Final files belong to the version the client approved and are
       // delivered after that approval; a new version starts from the working
       // files (originals, editables, cover) and gets its own finals later.
-      const files = db.all("SELECT * FROM material_files WHERE version_id = ? AND role != 'final'", [current.id]);
+      const files = await db.all("SELECT * FROM material_files WHERE version_id = ? AND role != 'final'", [current.id]);
       const jobs = req.ctx.jobs;
       for (const file of files) {
         const fileId = newId("fil");
-        db.run(
+        await db.run(
           `INSERT INTO material_files (id, version_id, material_id, role, position, original_name, display_name, ext, mime,
              size_bytes, sha256, storage_key, media_kind, width, height, duration_ms, preview_status, font_distributable,
              created_by, created_at)
@@ -723,7 +723,7 @@ export function createVersion(req, materialId, input = {}) {
            FROM material_files WHERE id = ?`,
           [fileId, versionId, req.user.id, at, file.id],
         );
-        db.run(
+        await db.run(
           `INSERT INTO file_renditions (file_id, kind, storage_key, mime, width, height, size_bytes, created_at)
            SELECT ?, kind, storage_key, mime, width, height, size_bytes, ? FROM file_renditions WHERE file_id = ?`,
           [fileId, at, file.id],
@@ -731,10 +731,11 @@ export function createVersion(req, materialId, input = {}) {
         // previews still being generated for the source: generate (or reuse) them for the copy too
         if (file.preview_status === "pending" && jobs) db.afterCommit(() => jobs.enqueue("renditions", { fileId }));
       }
+      await enforceFontLicence(db, material.id, versionId);
     }
-    db.run("UPDATE materials SET current_version_id = ?, updated_at = ? WHERE id = ?", [versionId, at, material.id]);
-    if (input.files?.length) attachUploads(req, { materialId: material.id, versionId, files: input.files });
-    logActivity(req, {
+    await db.run("UPDATE materials SET current_version_id = ?, updated_at = ? WHERE id = ?", [versionId, at, material.id]);
+    if (input.files?.length) await attachUploads(req, { materialId: material.id, versionId, files: input.files });
+    await logActivity(req, {
       action: "version.created",
       entityType: "version",
       entityId: versionId,
@@ -747,20 +748,38 @@ export function createVersion(req, materialId, input = {}) {
 }
 
 /**
+ * Copied font files keep their flag unless the material is linked to brand
+ * fonts and none of them is released with distribution allowed: then they
+ * are not distributable (the licence only reaches the client through a
+ * released font entry).
+ */
+async function enforceFontLicence(db, materialId, versionId) {
+  const fonts = await db.get(
+    `SELECT COUNT(*) AS linked, SUM(distribution = 'allowed' AND visibility = 'released') AS allowed
+       FROM brand_fonts WHERE material_id = ?`,
+    [materialId],
+  );
+  if (fonts.linked > 0 && !fonts.allowed)
+    await db.run("UPDATE material_files SET font_distributable = 0 WHERE version_id = ? AND media_kind = 'font' AND font_distributable = 1", [
+      versionId,
+    ]);
+}
+
+/**
  * attachUploads(req, { materialId, versionId, files: [{ uploadId, role, position }], published })
  * -> fileIds. Uploads must belong to req.user and still be 'uploaded'. The
  * material file reuses the upload's storage key; renditions are enqueued
  * after the transaction commits. published: false keeps the new files away
  * from the client until they are delivered (finals added after a release).
  */
-export function attachUploads(req, { materialId, versionId, files, published = true }) {
+export async function attachUploads(req, { materialId, versionId, files, published = true }) {
   const { db } = req.ctx;
   if (!Array.isArray(files) || !files.length) return [];
-  const version = db.get("SELECT * FROM material_versions WHERE id = ? AND material_id = ?", [versionId, materialId]);
+  const version = await db.get("SELECT * FROM material_versions WHERE id = ? AND material_id = ?", [versionId, materialId]);
   if (!version) throw notFound();
-  const fontAllowed = db.get(
+  const fontAllowed = await db.get(
     // Only a RELEASED font entry can open the file (same rule as brandlib's
-    // syncFontDistribution and the material_files_font_licence trigger).
+    // syncFontDistribution and enforceFontLicence for version copies).
     "SELECT 1 AS ok FROM brand_fonts WHERE material_id = ? AND distribution = 'allowed' AND visibility = 'released' LIMIT 1",
     [materialId],
   )
@@ -768,17 +787,18 @@ export function attachUploads(req, { materialId, versionId, files, published = t
     : 0;
 
   const fields = {};
-  const uploads = files.map((item, index) => {
+  const uploads = [];
+  for (const [index, item] of files.entries()) {
     const role = item.role ?? "original";
     if (!FILE_ROLES.has(role)) fields[`files.${index}.role`] = "Tipo de arquivo inválido.";
     const upload = item.uploadId
-      ? db.get("SELECT * FROM uploads WHERE id = ? AND user_id = ? AND status = 'uploaded'", [item.uploadId, req.user.id])
+      ? await db.get("SELECT * FROM uploads WHERE id = ? AND user_id = ? AND status = 'uploaded'", [item.uploadId, req.user.id])
       : null;
     if (!upload) fields[`files.${index}.uploadId`] = "Envio não encontrado ou já utilizado. Envie o arquivo de novo.";
     else if (role === "cover" && upload.media_kind !== "image")
       fields[`files.${index}.role`] = "A capa precisa ser uma imagem (PNG, JPG ou WEBP).";
-    return { item, role, upload };
-  });
+    uploads.push({ item, role, upload });
+  }
   const seen = new Set();
   uploads.forEach(({ item }, index) => {
     if (seen.has(item.uploadId)) fields[`files.${index}.uploadId`] = "Arquivo repetido.";
@@ -788,14 +808,14 @@ export function attachUploads(req, { materialId, versionId, files, published = t
 
   const at = now();
   const ids = [];
-  db.tx(() => {
+  await db.tx(async () => {
     for (const { item, role, upload } of uploads) {
       const position =
         Number.isInteger(item.position) && item.position > 0
           ? item.position
-          : (db.get("SELECT MAX(position) AS n FROM material_files WHERE version_id = ? AND role = ?", [versionId, role])?.n ?? 0) + 1;
+          : ((await db.get("SELECT MAX(position) AS n FROM material_files WHERE version_id = ? AND role = ?", [versionId, role]))?.n ?? 0) + 1;
       const fileId = newId("fil");
-      db.run(
+      await db.run(
         `INSERT INTO material_files (id, version_id, material_id, role, position, original_name, display_name, ext, mime,
            size_bytes, sha256, storage_key, media_kind, width, height, duration_ms, preview_status, font_distributable,
            created_by, created_at, published)
@@ -824,10 +844,10 @@ export function attachUploads(req, { materialId, versionId, files, published = t
           published ? 1 : 0,
         ],
       );
-      db.run("UPDATE uploads SET status = 'attached', attached_at = ? WHERE id = ?", [at, upload.id]);
+      await db.run("UPDATE uploads SET status = 'attached', attached_at = ? WHERE id = ?", [at, upload.id]);
       ids.push(fileId);
     }
-    db.run("UPDATE materials SET updated_at = ? WHERE id = ?", [at, materialId]);
+    await db.run("UPDATE materials SET updated_at = ? WHERE id = ?", [at, materialId]);
   });
   const jobs = req.ctx.jobs;
   if (jobs) db.afterCommit(() => ids.forEach((fileId) => jobs.enqueue("renditions", { fileId })));
@@ -892,7 +912,7 @@ function uniquePath(taken, path) {
  * storageKey, path, sizeBytes, ext, role, store } in order; storageKey stays
  * on the server. `store` marks formats that are already compressed.
  */
-export function zipEntries(req, rows, { layout = "library", root, includeEditables = true, fileIds = null } = {}) {
+export async function zipEntries(req, rows, { layout = "library", root, includeEditables = true, fileIds = null } = {}) {
   if (!rows.length) return [];
   const db = req.ctx.db;
   const client = req.user.role === "client";
@@ -902,8 +922,8 @@ export function zipEntries(req, rows, { layout = "library", root, includeEditabl
   const selected = fileIds ? new Set(fileIds) : null;
   const byVersion = new Map();
   const fileRows = selected
-    ? selectIn(db, "SELECT * FROM material_files WHERE id IN (?)", [...selected])
-    : selectIn(db, "SELECT * FROM material_files WHERE version_id IN (?)", rows.map(versionIdOf));
+    ? await selectIn(db, "SELECT * FROM material_files WHERE id IN (?)", [...selected])
+    : await selectIn(db, "SELECT * FROM material_files WHERE version_id IN (?)", rows.map(versionIdOf));
   for (const file of fileRows) {
     const key = selected ? file.material_id : file.version_id;
     if (!byVersion.has(key)) byVersion.set(key, []);
@@ -1006,11 +1026,11 @@ export async function removeStorageIfUnreferenced(ctx, key) {
   if (!key) return false;
   const { db } = ctx;
   const used =
-    db.get("SELECT 1 FROM material_files WHERE storage_key = ? LIMIT 1", [key]) ||
-    db.get("SELECT 1 FROM uploads WHERE storage_key = ? AND status != 'discarded' LIMIT 1", [key]) ||
-    db.get("SELECT 1 FROM file_renditions WHERE storage_key = ? LIMIT 1", [key]) ||
-    db.get("SELECT 1 FROM zip_jobs WHERE storage_key = ? LIMIT 1", [key]) ||
-    db.get("SELECT 1 FROM contracts WHERE ? IN (document_key, signed_key, evidence_key) LIMIT 1", [key]);
+    await db.get("SELECT 1 FROM material_files WHERE storage_key = ? LIMIT 1", [key]) ||
+    await db.get("SELECT 1 FROM uploads WHERE storage_key = ? AND status != 'discarded' LIMIT 1", [key]) ||
+    await db.get("SELECT 1 FROM file_renditions WHERE storage_key = ? LIMIT 1", [key]) ||
+    await db.get("SELECT 1 FROM zip_jobs WHERE storage_key = ? LIMIT 1", [key]) ||
+    await db.get("SELECT 1 FROM contracts WHERE ? IN (document_key, signed_key, evidence_key) LIMIT 1", [key]);
   if (used) return false;
   await ctx.storage.remove(key);
   return true;
@@ -1024,8 +1044,8 @@ export async function removeStorageIfUnreferenced(ctx, key) {
 export async function releaseStorageKeys(ctx, keys) {
   for (const key of new Set((keys ?? []).filter(Boolean))) {
     try {
-      if (!ctx.db.get("SELECT 1 FROM material_files WHERE storage_key = ? LIMIT 1", [key]))
-        ctx.db.run("UPDATE uploads SET status = 'discarded' WHERE storage_key = ? AND status = 'attached'", [key]);
+      if (!await ctx.db.get("SELECT 1 FROM material_files WHERE storage_key = ? LIMIT 1", [key]))
+        await ctx.db.run("UPDATE uploads SET status = 'discarded' WHERE storage_key = ? AND status = 'attached'", [key]);
       await removeStorageIfUnreferenced(ctx, key);
     } catch (err) {
       ctx.log?.warn?.(`[storage] could not remove an object: ${err.message}`);
@@ -1041,9 +1061,9 @@ export const STALE_UPLOAD_HOURS = 48;
  */
 export async function cleanupStaleUploads(ctx, { olderThanHours = STALE_UPLOAD_HOURS } = {}) {
   const cutoff = new Date(Date.now() - olderThanHours * 3600 * 1000).toISOString();
-  const rows = ctx.db.all("SELECT id, storage_key FROM uploads WHERE status = 'uploaded' AND created_at < ?", [cutoff]);
+  const rows = await ctx.db.all("SELECT id, storage_key FROM uploads WHERE status = 'uploaded' AND created_at < ?", [cutoff]);
   for (const row of rows) {
-    ctx.db.run("UPDATE uploads SET status = 'discarded' WHERE id = ? AND status = 'uploaded'", [row.id]);
+    await ctx.db.run("UPDATE uploads SET status = 'discarded' WHERE id = ? AND status = 'uploaded'", [row.id]);
     try {
       await removeStorageIfUnreferenced(ctx, row.storage_key);
     } catch (err) {
@@ -1066,13 +1086,13 @@ export const staffMaterialLink = (row) =>
  * when app (plus e-mail when email), or e-mail only when !app && email.
  * payload follows lib/notify.js.
  */
-export function sendNotice(req, userIds, payload, { app = true, email = false } = {}) {
-  if (app) return notify(req, userIds, { ...payload, email: Boolean(email) });
+export async function sendNotice(req, userIds, payload, { app = true, email = false } = {}) {
+  if (app) return await notify(req, userIds, { ...payload, email: Boolean(email) });
   if (!email) return [];
   const { db, mailer, config } = req.ctx;
   const ids = [...new Set((userIds ?? []).filter(Boolean))].filter((id) => payload.includeSelf || id !== req.user?.id);
   if (!ids.length || !mailer) return [];
-  const users = db.all(
+  const users = await db.all(
     `SELECT id, email FROM users WHERE id IN (${placeholders(ids)}) AND status = 'active' AND notify_email = 1`,
     ids,
   );
@@ -1085,9 +1105,8 @@ export function sendNotice(req, userIds, payload, { app = true, email = false } 
       actionLabel: payload.actionLabel ?? "Abrir na plataforma",
       actionUrl,
     });
-    db.afterCommit(() => {
-      mailer.send({ to: user.email, toUserId: user.id, ...message }).catch(() => {});
-    });
+    // recorded now (inside the caller's transaction); delivered after the commit
+    await mailer.enqueue({ to: user.email, toUserId: user.id, ...message });
   }
   return [];
 }
@@ -1103,8 +1122,8 @@ export const KIT_SELECT = `SELECT k.*, b.client_id AS client_id, b.name AS brand
   LEFT JOIN projects p ON p.id = k.project_id`;
 
 // Scope-level write check for kits (capabilities are checked by the route).
-export function canWriteKit(req, kit) {
-  const scope = getScope(req);
+export async function canWriteKit(req, kit) {
+  const scope = await getScope(req);
   const user = req.user;
   if (!kit || !scope.materials || user.role === "client" || user.role === "finance") return false;
   if (scope.all) return true;
@@ -1119,23 +1138,23 @@ export function canWriteKit(req, kit) {
  * scope. Clients: only released kits of their own client. Out of scope ->
  * 404; visible but not writable -> 403.
  */
-export function assertKit(req, id, { write = false } = {}) {
-  const scope = getScope(req);
-  const kit = id ? req.ctx.db.get(`${KIT_SELECT} WHERE k.id = ?`, [id]) : null;
+export async function assertKit(req, id, { write = false } = {}) {
+  const scope = await getScope(req);
+  const kit = id ? await req.ctx.db.get(`${KIT_SELECT} WHERE k.id = ?`, [id]) : null;
   if (!kit || !scope.materials) throw notFound();
   if (req.user.role === "client") {
     if (kit.client_id !== req.user.client_id || kit.status !== "released") throw notFound();
   } else {
-    assertBrand(req, kit.brand_id);
+    await assertBrand(req, kit.brand_id);
   }
-  if (write && !canWriteKit(req, kit)) throw forbidden();
+  if (write && !await canWriteKit(req, kit)) throw forbidden();
   return kit;
 }
 
 // MATERIAL_SELECT rows of a kit, in kit order, limited to what the viewer may see.
-export function kitMaterialRows(req, kitId, { includeArchived = false } = {}) {
+export async function kitMaterialRows(req, kitId, { includeArchived = false } = {}) {
   const s = scopeSql.materials(req, "m", "b");
-  return req.ctx.db.all(
+  return await req.ctx.db.all(
     `${MATERIAL_SELECT}
        JOIN kit_items ki ON ki.material_id = m.id
       WHERE ki.kit_id = ? AND ${s.sql} ${includeArchived ? "" : "AND m.archived_at IS NULL"}
@@ -1155,17 +1174,19 @@ const plural = (n, one, many) => (n === 1 ? one : many);
  * version, so they must not reach the client as this version's finals.
  * (New versions no longer copy finals; this guards versions created before.)
  */
-function inheritedFinals(db, version, files) {
+async function inheritedFinals(db, version, files) {
   if (!version) return [];
-  return files.filter(
-    (file) =>
-      file.role === "final" &&
-      db.get(
-        `SELECT 1 FROM material_files o JOIN material_versions ov ON ov.id = o.version_id
-          WHERE o.material_id = ? AND o.role = 'final' AND o.storage_key = ? AND ov.number < ? LIMIT 1`,
-        [version.material_id, file.storage_key, version.number],
-      ),
-  );
+  const inherited = [];
+  for (const file of files) {
+    if (file.role !== "final") continue;
+    const older = await db.get(
+      `SELECT 1 FROM material_files o JOIN material_versions ov ON ov.id = o.version_id
+        WHERE o.material_id = ? AND o.role = 'final' AND o.storage_key = ? AND ov.number < ? LIMIT 1`,
+      [version.material_id, file.storage_key, version.number],
+    );
+    if (older) inherited.push(file);
+  }
+  return inherited;
 }
 
 /**
@@ -1174,11 +1195,11 @@ function inheritedFinals(db, version, files) {
  * client users (in-app) and those of them with e-mail notices on (e-mail).
  * emailConfigured false means the e-mails were only recorded as not sent.
  */
-export function clientNoticeOutcome(req, clientId, { app = false, email = false, sent = true } = {}) {
+export async function clientNoticeOutcome(req, clientId, { app = false, email = false, sent = true } = {}) {
   const { db, mailer } = req.ctx;
   const users =
     sent && (app || email) && clientId
-      ? db.all("SELECT notify_email FROM users WHERE role = 'client' AND client_id = ? AND status = 'active'", [clientId])
+      ? await db.all("SELECT notify_email FROM users WHERE role = 'client' AND client_id = ? AND status = 'active'", [clientId])
       : [];
   return {
     emailConfigured: Boolean(mailer?.isConfigured?.()),
@@ -1192,24 +1213,24 @@ export function clientNoticeOutcome(req, clientId, { app = false, email = false,
  * kit), checks scope/capability and computes what the client will get.
  * -> { summary (API shape), internal: [{ row, version, files, ... }], kit, brand }
  */
-function releasePlan(req, { materialIds = [], kitId = null } = {}) {
+async function releasePlan(req, { materialIds = [], kitId = null } = {}) {
   const { db } = req.ctx;
   if (!can(req.user, "materials.release")) throw forbidden(RELEASE_DENIED);
   let kit = null;
   let ids = [...new Set((Array.isArray(materialIds) ? materialIds : []).filter(Boolean))];
   if (kitId) {
-    kit = assertKit(req, kitId);
-    if (!canWriteKit(req, kit)) throw forbidden(RELEASE_DENIED);
-    const kitIds = db
-      .all("SELECT material_id FROM kit_items WHERE kit_id = ? ORDER BY sort_order, rowid", [kit.id])
+    kit = await assertKit(req, kitId);
+    if (!await canWriteKit(req, kit)) throw forbidden(RELEASE_DENIED);
+    const kitIds = (await db
+      .all("SELECT material_id FROM kit_items WHERE kit_id = ? ORDER BY sort_order, seq", [kit.id]))
       .map((row) => row.material_id);
     ids = [...new Set([...kitIds, ...ids])];
   }
   if (!ids.length)
     throw validation({ materialIds: kit ? "Adicione materiais ao kit antes de liberar." : "Selecione pelo menos um material." });
   if (ids.length > 500) throw validation({ materialIds: "Libere no máximo 500 materiais por vez." });
-  for (const id of ids) assertMaterial(req, id, { write: true });
-  const byId = new Map(loadMaterialRows(db, ids).map((row) => [row.id, row]));
+  for (const id of ids) await assertMaterial(req, id, { write: true });
+  const byId = new Map((await loadMaterialRows(db, ids)).map((row) => [row.id, row]));
   const rows = ids.map((id) => byId.get(id)).filter(Boolean);
 
   const blockers = [];
@@ -1217,7 +1238,7 @@ function releasePlan(req, { materialIds = [], kitId = null } = {}) {
   const brandIds = new Set(rows.map((row) => row.brand_id));
   if (kit) brandIds.add(kit.brand_id);
   if (brandIds.size > 1) blockers.push("Os materiais selecionados são de marcas diferentes. Libere uma marca por vez.");
-  const brand = db.get(
+  const brand = await db.get(
     `SELECT b.*, c.name AS client_name, c.status AS client_status
        FROM brands b JOIN clients c ON c.id = b.client_id WHERE b.id = ?`,
     [kit?.brand_id ?? rows[0].brand_id],
@@ -1228,16 +1249,24 @@ function releasePlan(req, { materialIds = [], kitId = null } = {}) {
   else if (brand.client_status === "paused") warnings.push(`A conta de ${brand.client_name} está pausada.`);
 
   const versions = new Map(
-    selectIn(db, "SELECT * FROM material_versions WHERE id IN (?)", rows.map((row) => row.current_version_id)).map((v) => [v.id, v]),
+    (await selectIn(db, "SELECT * FROM material_versions WHERE id IN (?)", rows.map((row) => row.current_version_id))).map((v) => [v.id, v]),
   );
   const filesByVersion = new Map();
-  for (const file of selectIn(db, "SELECT * FROM material_files WHERE version_id IN (?)", [...versions.keys()])) {
+  for (const file of await selectIn(db, "SELECT * FROM material_files WHERE version_id IN (?)", [...versions.keys()])) {
     if (!filesByVersion.has(file.version_id)) filesByVersion.set(file.version_id, []);
     filesByVersion.get(file.version_id).push(file);
   }
-  const renditions = loadRenditions(db, [...filesByVersion.values()].flat().map((f) => f.id));
-  const serialized = new Map(serializeMaterials(req, rows).map((m) => [m.id, m]));
+  const renditions = await loadRenditions(db, [...filesByVersion.values()].flat().map((f) => f.id));
+  const serialized = new Map((await serializeMaterials(req, rows)).map((m) => [m.id, m]));
   const clientViewer = { role: "client" };
+
+  // Inherited finals need a lookup per file: resolved before building the items.
+  const inheritedByMaterial = new Map();
+  for (const row of rows) {
+    const version = versions.get(row.current_version_id) ?? null;
+    if (version && !(version.released_at && row.released_version_id === version.id))
+      inheritedByMaterial.set(row.id, await inheritedFinals(db, version, sortFiles(filesByVersion.get(version.id) ?? [])));
+  }
 
   const internal = [];
   const items = rows.map((row) => {
@@ -1261,7 +1290,7 @@ function releasePlan(req, { materialIds = [], kitId = null } = {}) {
     if (files.some((f) => f.media_kind === "font" && f.font_distributable !== 1 && clientCanSeeFile(f, row)))
       itemWarnings.push(`${title}: a licença da fonte não permite distribuição; o cliente verá só a referência.`);
     if (row.download_enabled !== 1) itemWarnings.push(`${title}: download desativado — o cliente verá apenas a prévia.`);
-    const inherited = alreadyReleased ? [] : inheritedFinals(db, version, files);
+    const inherited = alreadyReleased ? [] : (inheritedByMaterial.get(row.id) ?? []);
     if (inherited.length)
       itemWarnings.push(
         `${title}: a versão ${version.number} traz ${plural(inherited.length, "1 arquivo final copiado", `${inherited.length} arquivos finais copiados`)} de uma versão anterior. ${plural(inherited.length, "Ele fica oculto", "Eles ficam ocultos")} para o cliente até uma nova entrega, depois da aprovação; remova se não fizer parte desta versão.`,
@@ -1302,11 +1331,11 @@ function releasePlan(req, { materialIds = [], kitId = null } = {}) {
   if (!kit && items.every((item) => item.alreadyReleased))
     blockers.push("Os materiais selecionados já estão liberados nas versões atuais.");
 
-  const recipients = db
+  const recipients = (await db
     .all(
       "SELECT id, name, email, notify_email FROM users WHERE role = 'client' AND client_id = ? AND status = 'active' ORDER BY name",
       [brand.client_id],
-    )
+    ))
     .map((user) => ({ id: user.id, name: user.name, email: user.email, notifyEmail: bool(user.notify_email) }));
   if (!recipients.length) warnings.push("O cliente ainda não tem usuários ativos: ninguém será notificado agora.");
 
@@ -1342,8 +1371,8 @@ function releasePlan(req, { materialIds = [], kitId = null } = {}) {
  * warnings, blockers }. Items flag missingProject and inheritedFinalCount.
  * Requires materials.release and write scope on every material (else 403/404).
  */
-export function previewRelease(req, input = {}) {
-  return releasePlan(req, input).summary;
+export async function previewRelease(req, input = {}) {
+  return (await releasePlan(req, input)).summary;
 }
 
 function releaseNotice(plan, changed) {
@@ -1390,10 +1419,10 @@ function releaseNotice(plan, changed) {
  * item ({[materialId]: bool} or one bool for all), releases + release_items,
  * client-visible history and notifications. 409 when the preview has blockers.
  */
-export function releaseMaterials(req, input = {}) {
+export async function releaseMaterials(req, input = {}) {
   const { db } = req.ctx;
   const user = req.user;
-  const plan = releasePlan(req, input);
+  const plan = await releasePlan(req, input);
   const { summary, kit, brand } = plan;
   if (summary.blockers.length) throw conflict(summary.blockers.join(" "));
 
@@ -1413,8 +1442,8 @@ export function releaseMaterials(req, input = {}) {
   const changed = [];
   const items = [];
   let noticeSent = false;
-  db.tx(() => {
-    db.run(
+  await db.tx(async () => {
+    await db.run(
       `INSERT INTO releases (id, client_id, brand_id, kit_id, actor_id, message, notify_email, notify_app, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [releaseId, brand.client_id, brand.id, kit?.id ?? null, user.id, message, notifyEmail ? 1 : 0, notifyApp ? 1 : 0, at],
@@ -1424,8 +1453,8 @@ export function releaseMaterials(req, input = {}) {
       const downloadEnabled = downloadFor(row);
       if (!alreadyReleased) {
         if (row.released_version_id && row.released_version_id !== version.id)
-          db.run("UPDATE material_versions SET status = 'superseded' WHERE id = ?", [row.released_version_id]);
-        db.run("UPDATE material_versions SET status = 'released', released_at = ?, released_by = ? WHERE id = ?", [
+          await db.run("UPDATE material_versions SET status = 'superseded' WHERE id = ?", [row.released_version_id]);
+        await db.run("UPDATE material_versions SET status = 'released', released_at = ?, released_by = ? WHERE id = ?", [
           at,
           user.id,
           version.id,
@@ -1433,15 +1462,15 @@ export function releaseMaterials(req, input = {}) {
         // finals copied from an older version wait for an explicit delivery
         // of this version instead of reaching the client as its finals
         const inherited = new Set(inheritedFinalIds ?? []);
-        for (const fileId of inherited) db.run("UPDATE material_files SET published = 0 WHERE id = ?", [fileId]);
+        for (const fileId of inherited) await db.run("UPDATE material_files SET published = 0 WHERE id = ?", [fileId]);
         const hasFinals = files.some((f) => f.role === "final" && isPublished(f) && !inherited.has(f.id));
-        db.run(
+        await db.run(
           `UPDATE materials SET visibility = 'released', released_version_id = ?, released_at = ?, released_by = ?,
              approval_status = ?, download_enabled = ?, delivered_at = ?, updated_at = ?
            WHERE id = ?`,
           [version.id, at, user.id, row.requires_approval === 1 ? "pending" : "none", downloadEnabled, hasFinals ? at : null, at, row.id],
         );
-        logActivity(req, {
+        await logActivity(req, {
           action: "material.released",
           entityType: "material",
           entityId: row.id,
@@ -1464,8 +1493,8 @@ export function releaseMaterials(req, input = {}) {
         });
         changed.push(entry);
       } else if (downloadEnabled !== row.download_enabled) {
-        db.run("UPDATE materials SET download_enabled = ?, updated_at = ? WHERE id = ?", [downloadEnabled, at, row.id]);
-        logActivity(req, {
+        await db.run("UPDATE materials SET download_enabled = ?, updated_at = ? WHERE id = ?", [downloadEnabled, at, row.id]);
+        await logActivity(req, {
           action: downloadEnabled ? "material.download_enabled" : "material.download_disabled",
           entityType: "material",
           entityId: row.id,
@@ -1478,7 +1507,7 @@ export function releaseMaterials(req, input = {}) {
           data: { releaseId, downloadEnabled: downloadEnabled === 1 },
         });
       }
-      db.run("INSERT INTO release_items (release_id, material_id, version_id, download_enabled) VALUES (?, ?, ?, ?)", [
+      await db.run("INSERT INTO release_items (release_id, material_id, version_id, download_enabled) VALUES (?, ?, ?, ?)", [
         releaseId,
         row.id,
         version.id,
@@ -1493,13 +1522,13 @@ export function releaseMaterials(req, input = {}) {
       });
     }
     if (kit) {
-      db.run("UPDATE kits SET status = 'released', released_at = ?, released_by = ?, updated_at = ? WHERE id = ?", [
+      await db.run("UPDATE kits SET status = 'released', released_at = ?, released_by = ?, updated_at = ? WHERE id = ?", [
         at,
         user.id,
         at,
         kit.id,
       ]);
-      logActivity(req, {
+      await logActivity(req, {
         action: "kit.released",
         entityType: "kit",
         entityId: kit.id,
@@ -1511,7 +1540,7 @@ export function releaseMaterials(req, input = {}) {
         data: { releaseId, materials: items.length },
       });
     }
-    logActivity(req, {
+    await logActivity(req, {
       action: "release.created",
       entityType: "release",
       entityId: releaseId,
@@ -1523,9 +1552,9 @@ export function releaseMaterials(req, input = {}) {
     noticeSent = (notifyApp || notifyEmail) && Boolean(changed.length || kit);
     if (noticeSent) {
       const notice = releaseNotice(plan, changed);
-      sendNotice(
+      await sendNotice(
         req,
-        clientUserIds(db, brand.client_id),
+        await clientUserIds(db, brand.client_id),
         {
           type: kit ? "kit.released" : "material.released",
           title: notice.title,
@@ -1556,9 +1585,9 @@ export function releaseMaterials(req, input = {}) {
       releasedCount: changed.length,
     },
     items,
-    materials: serializeMaterials(req, loadMaterialRows(db, items.map((i) => i.materialId))),
+    materials: await serializeMaterials(req, await loadMaterialRows(db, items.map((i) => i.materialId))),
     // who was told: the UI never claims an e-mail that was not sent
-    ...clientNoticeOutcome(req, brand.client_id, { app: notifyApp, email: notifyEmail, sent: noticeSent }),
+    ...await clientNoticeOutcome(req, brand.client_id, { app: notifyApp, email: notifyEmail, sent: noticeSent }),
   };
 }
 
@@ -1576,15 +1605,15 @@ export function releaseMaterials(req, input = {}) {
  * 409 when there is nothing to deliver or it was already delivered.
  * -> { mode, published, files, emailConfigured, appRecipients, emailRecipients }
  */
-export function deliverMaterial(req, materialId, input = {}) {
+export async function deliverMaterial(req, materialId, input = {}) {
   const { db } = req.ctx;
   const user = req.user;
   if (!can(user, "materials.release")) throw forbidden("Somente gestores e administradores entregam arquivos ao cliente.");
-  const material = assertMaterial(req, materialId, { write: true });
+  const material = await assertMaterial(req, materialId, { write: true });
   if (material.archived_at) throw conflict("Material arquivado. Desarquive antes de entregar.");
   if (material.visibility !== "released" || !material.released_version_id)
     throw conflict("Libere o material ao cliente antes de entregar os arquivos.");
-  const files = db.all(
+  const files = await db.all(
     "SELECT * FROM material_files WHERE version_id = ? AND role IN ('final', 'original') ORDER BY role, position",
     [material.released_version_id],
   );
@@ -1599,7 +1628,7 @@ export function deliverMaterial(req, materialId, input = {}) {
       mode === "finals" ? "Os arquivos finais desta versão já foram entregues." : "Este material já está marcado como entregue.",
     );
 
-  const version = db.get("SELECT id, number FROM material_versions WHERE id = ?", [material.released_version_id]);
+  const version = await db.get("SELECT id, number FROM material_versions WHERE id = ?", [material.released_version_id]);
   const delivered = mode === "finals" ? finals : originals;
   const notifyApp = input.notifyApp !== false;
   const notifyEmail = input.notifyEmail !== false;
@@ -1607,15 +1636,15 @@ export function deliverMaterial(req, materialId, input = {}) {
   const downloadEnabled =
     input.downloadEnabled === undefined || input.downloadEnabled === null ? material.download_enabled : input.downloadEnabled ? 1 : 0;
   const at = now();
-  db.tx(() => {
-    for (const file of pending) db.run("UPDATE material_files SET published = 1 WHERE id = ?", [file.id]);
-    db.run("UPDATE materials SET delivered_at = ?, download_enabled = ?, updated_at = ? WHERE id = ?", [
+  await db.tx(async () => {
+    for (const file of pending) await db.run("UPDATE material_files SET published = 1 WHERE id = ?", [file.id]);
+    await db.run("UPDATE materials SET delivered_at = ?, download_enabled = ?, updated_at = ? WHERE id = ?", [
       at,
       downloadEnabled,
       at,
       material.id,
     ]);
-    logActivity(req, {
+    await logActivity(req, {
       action: "material.delivered",
       entityType: "material",
       entityId: material.id,
@@ -1639,9 +1668,9 @@ export function deliverMaterial(req, materialId, input = {}) {
     });
     if (notifyApp || notifyEmail) {
       const ready = downloadEnabled === 1;
-      sendNotice(
+      await sendNotice(
         req,
-        clientUserIds(db, material.client_id),
+        await clientUserIds(db, material.client_id),
         {
           type: "material.delivered",
           title: mode === "finals" ? `Arquivos finais de ${quote(material.title)}` : `${quote(material.title)} entregue`,
@@ -1673,7 +1702,7 @@ export function deliverMaterial(req, materialId, input = {}) {
     mode,
     published: pending.length,
     files: delivered.length,
-    ...clientNoticeOutcome(req, material.client_id, { app: notifyApp, email: notifyEmail }),
+    ...await clientNoticeOutcome(req, material.client_id, { app: notifyApp, email: notifyEmail }),
   };
 }
 

@@ -62,7 +62,7 @@ export default function kitsRoutes(ctx) {
   const router = Router();
   const { db } = ctx;
 
-  function serializeKit(req, row, materials, { withItems = false } = {}) {
+  async function serializeKit(req, row, materials, { withItems = false } = {}) {
     const staff = isStaff(req);
     const kit = {
       id: row.id,
@@ -85,7 +85,7 @@ export default function kitsRoutes(ctx) {
     };
     if (withItems) kit.items = materials;
     if (staff) {
-      const writable = canWriteKit(req, row);
+      const writable = await canWriteKit(req, row);
       kit.unreleasedCount = materials.filter((m) => !m.releasedVersionId || m.releasedVersionId !== m.currentVersionId).length;
       kit.permissions = {
         canEdit: writable && can(req.user, "materials.edit"),
@@ -95,37 +95,36 @@ export default function kitsRoutes(ctx) {
     return kit;
   }
 
-  const kitMaterials = (req, kitId) =>
-    serializeMaterials(req, kitMaterialRows(req, kitId, { includeArchived: isStaff(req) }));
+  const kitMaterials = async (req, kitId) =>
+    await serializeMaterials(req, await kitMaterialRows(req, kitId, { includeArchived: isStaff(req) }));
 
-  const loadKit = (kitId) => db.get(`${KIT_SELECT} WHERE k.id = ?`, [kitId]);
+  const loadKit = async (kitId) => await db.get(`${KIT_SELECT} WHERE k.id = ?`, [kitId]);
 
   // Materials for a kit: in scope, same brand, active; out-of-scope ids -> 422.
-  function checkItems(req, brandId, materialIds) {
+  async function checkItems(req, brandId, materialIds) {
     const unique = [...new Set(materialIds)];
     const fields = {};
-    unique.forEach((materialId, index) => {
+    for (const [index, materialId] of unique.entries()) {
       try {
-        const row = assertMaterial(req, materialId);
+        const row = await assertMaterial(req, materialId);
         if (row.brand_id !== brandId) fields[`materialIds.${index}`] = "Este material é de outra marca.";
         else if (row.archived_at) fields[`materialIds.${index}`] = "Este material está arquivado.";
       } catch (err) {
         if (!(err instanceof HttpError) || err.status !== 404) throw err;
         fields[`materialIds.${index}`] = "Material não encontrado.";
       }
-    });
+    }
     if (Object.keys(fields).length) throw validation(fields, "Revise os materiais do kit.");
     return unique;
   }
 
-  function writeItems(kitId, materialIds) {
-    db.run("DELETE FROM kit_items WHERE kit_id = ?", [kitId]);
-    materialIds.forEach((materialId, index) =>
-      db.run("INSERT INTO kit_items (kit_id, material_id, sort_order) VALUES (?, ?, ?)", [kitId, materialId, (index + 1) * 10]),
-    );
+  async function writeItems(kitId, materialIds) {
+    await db.run("DELETE FROM kit_items WHERE kit_id = ?", [kitId]);
+    for (const [index, materialId] of materialIds.entries())
+      await db.run("INSERT INTO kit_items (kit_id, material_id, sort_order) VALUES (?, ?, ?)", [kitId, materialId, (index + 1) * 10]);
   }
 
-  router.get("/api/kits", requireAuth, requireCap("materials.view", "portal.access"), (req, res) => {
+  router.get("/api/kits", requireAuth, requireCap("materials.view", "portal.access"), async (req, res) => {
     const staff = isStaff(req);
     const scope = scopeSql.brands(req, "b");
     const where = [scope.sql];
@@ -146,38 +145,38 @@ export default function kitsRoutes(ctx) {
     } else {
       where.push("k.status = 'released'");
     }
-    const rows = db.all(`${KIT_SELECT} WHERE ${where.join(" AND ")} ORDER BY k.updated_at DESC, k.id`, params);
-    const items = rows
-      .map((row) => serializeKit(req, row, kitMaterials(req, row.id)))
-      .filter((kit) => staff || kit.itemCount > 0);
+    const rows = await db.all(`${KIT_SELECT} WHERE ${where.join(" AND ")} ORDER BY k.updated_at DESC, k.id`, params);
+    const items = (await Promise.all(rows.map(async (row) => await serializeKit(req, row, await kitMaterials(req, row.id))))).filter(
+      (kit) => staff || kit.itemCount > 0,
+    );
     res.json({ items, total: items.length });
   });
 
-  router.post("/api/kits", requireAuth, requireCap("materials.edit"), (req, res) => {
+  router.post("/api/kits", requireAuth, requireCap("materials.edit"), async (req, res) => {
     const body = parse(createSchema, req.body);
-    const brand = assertBrand(req, body.brandId);
+    const brand = await assertBrand(req, body.brandId);
     if (brand.status !== "active") throw validation({ brandId: "Esta marca está arquivada." });
     let project = null;
     if (body.projectId) {
       try {
-        project = assertProject(req, body.projectId);
+        project = await assertProject(req, body.projectId);
       } catch (err) {
         if (err instanceof HttpError && err.status === 404) throw validation({ projectId: "Projeto não encontrado." });
         throw err;
       }
       if (project.brand_id !== brand.id) throw validation({ projectId: "O projeto precisa ser da mesma marca." });
     }
-    const materialIds = checkItems(req, brand.id, body.materialIds);
+    const materialIds = await checkItems(req, brand.id, body.materialIds);
     const kitId = newId("kit");
     const at = now();
-    db.tx(() => {
-      db.run(
+    await db.tx(async () => {
+      await db.run(
         `INSERT INTO kits (id, brand_id, project_id, name, description, kind, status, created_by, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)`,
         [kitId, brand.id, project?.id ?? null, body.name, body.description ?? null, body.kind, req.user.id, at, at],
       );
-      writeItems(kitId, materialIds);
-      logActivity(req, {
+      await writeItems(kitId, materialIds);
+      await logActivity(req, {
         action: "kit.created",
         entityType: "kit",
         entityId: kitId,
@@ -188,16 +187,16 @@ export default function kitsRoutes(ctx) {
         data: { materialIds },
       });
     });
-    res.status(201).json({ kit: serializeKit(req, loadKit(kitId), kitMaterials(req, kitId), { withItems: true }) });
+    res.status(201).json({ kit: await serializeKit(req, await loadKit(kitId), await kitMaterials(req, kitId), { withItems: true }) });
   });
 
-  router.get("/api/kits/:id", requireAuth, requireCap("materials.view", "portal.access"), (req, res) => {
-    const kit = assertKit(req, req.params.id);
-    res.json({ kit: serializeKit(req, kit, kitMaterials(req, kit.id), { withItems: true }) });
+  router.get("/api/kits/:id", requireAuth, requireCap("materials.view", "portal.access"), async (req, res) => {
+    const kit = await assertKit(req, req.params.id);
+    res.json({ kit: await serializeKit(req, kit, await kitMaterials(req, kit.id), { withItems: true }) });
   });
 
-  router.patch("/api/kits/:id", requireAuth, requireCap("materials.edit"), (req, res) => {
-    const kit = assertKit(req, req.params.id, { write: true });
+  router.patch("/api/kits/:id", requireAuth, requireCap("materials.edit"), async (req, res) => {
+    const kit = await assertKit(req, req.params.id, { write: true });
     const body = parse(patchSchema, req.body);
     const sets = [];
     const params = [];
@@ -213,7 +212,7 @@ export default function kitsRoutes(ctx) {
       else {
         let project;
         try {
-          project = assertProject(req, body.projectId);
+          project = await assertProject(req, body.projectId);
         } catch (err) {
           if (err instanceof HttpError && err.status === 404) throw validation({ projectId: "Projeto não encontrado." });
           throw err;
@@ -228,9 +227,9 @@ export default function kitsRoutes(ctx) {
       set("status", body.status);
     }
     if (sets.length) {
-      db.tx(() => {
-        db.run(`UPDATE kits SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`, [...params, now(), kit.id]);
-        logActivity(req, {
+      await db.tx(async () => {
+        await db.run(`UPDATE kits SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`, [...params, now(), kit.id]);
+        await logActivity(req, {
           action: body.status === "archived" ? "kit.archived" : "kit.updated",
           entityType: "kit",
           entityId: kit.id,
@@ -244,16 +243,16 @@ export default function kitsRoutes(ctx) {
         });
       });
     }
-    res.json({ kit: serializeKit(req, loadKit(kit.id), kitMaterials(req, kit.id), { withItems: true }) });
+    res.json({ kit: await serializeKit(req, await loadKit(kit.id), await kitMaterials(req, kit.id), { withItems: true }) });
   });
 
-  router.delete("/api/kits/:id", requireAuth, requireCap("materials.edit"), (req, res) => {
-    const kit = assertKit(req, req.params.id, { write: true });
+  router.delete("/api/kits/:id", requireAuth, requireCap("materials.edit"), async (req, res) => {
+    const kit = await assertKit(req, req.params.id, { write: true });
     if (kit.status === "released")
       throw conflict("Kits liberados ficam no histórico do cliente. Arquive o kit em vez de excluir.");
-    db.tx(() => {
-      db.run("DELETE FROM kits WHERE id = ?", [kit.id]);
-      logActivity(req, {
+    await db.tx(async () => {
+      await db.run("DELETE FROM kits WHERE id = ?", [kit.id]);
+      await logActivity(req, {
         action: "kit.deleted",
         entityType: "kit",
         entityId: kit.id,
@@ -265,15 +264,15 @@ export default function kitsRoutes(ctx) {
     res.status(204).end();
   });
 
-  router.put("/api/kits/:id/items", requireAuth, requireCap("materials.edit"), (req, res) => {
-    const kit = assertKit(req, req.params.id, { write: true });
+  router.put("/api/kits/:id/items", requireAuth, requireCap("materials.edit"), async (req, res) => {
+    const kit = await assertKit(req, req.params.id, { write: true });
     if (kit.status === "archived") throw conflict("Kit arquivado. Restaure-o para editar os itens.");
     const { materialIds } = parse(itemsSchema, req.body);
-    const ids = checkItems(req, kit.brand_id, materialIds);
-    db.tx(() => {
-      writeItems(kit.id, ids);
-      db.run("UPDATE kits SET updated_at = ? WHERE id = ?", [now(), kit.id]);
-      logActivity(req, {
+    const ids = await checkItems(req, kit.brand_id, materialIds);
+    await db.tx(async () => {
+      await writeItems(kit.id, ids);
+      await db.run("UPDATE kits SET updated_at = ? WHERE id = ?", [now(), kit.id]);
+      await logActivity(req, {
         action: "kit.items_updated",
         entityType: "kit",
         entityId: kit.id,
@@ -283,19 +282,19 @@ export default function kitsRoutes(ctx) {
         data: { materialIds: ids },
       });
     });
-    res.json({ kit: serializeKit(req, loadKit(kit.id), kitMaterials(req, kit.id), { withItems: true }) });
+    res.json({ kit: await serializeKit(req, await loadKit(kit.id), await kitMaterials(req, kit.id), { withItems: true }) });
   });
 
-  router.post("/api/kits/:id/release/preview", requireAuth, requireCap("materials.release"), (req, res) => {
-    res.json(previewRelease(req, { kitId: req.params.id }));
+  router.post("/api/kits/:id/release/preview", requireAuth, requireCap("materials.release"), async (req, res) => {
+    res.json(await previewRelease(req, { kitId: req.params.id }));
   });
 
-  router.post("/api/kits/:id/release", requireAuth, requireCap("materials.release"), (req, res) => {
-    const kit = assertKit(req, req.params.id, { write: true });
+  router.post("/api/kits/:id/release", requireAuth, requireCap("materials.release"), async (req, res) => {
+    const kit = await assertKit(req, req.params.id, { write: true });
     if (kit.status === "archived") throw conflict("Kit arquivado. Restaure-o antes de liberar.");
     const body = parse(releaseSchema, req.body ?? {});
-    const result = releaseMaterials(req, { ...body, kitId: kit.id });
-    res.status(201).json({ ...result, kit: serializeKit(req, loadKit(kit.id), kitMaterials(req, kit.id), { withItems: true }) });
+    const result = await releaseMaterials(req, { ...body, kitId: kit.id });
+    res.status(201).json({ ...result, kit: await serializeKit(req, await loadKit(kit.id), await kitMaterials(req, kit.id), { withItems: true }) });
   });
 
   return router;

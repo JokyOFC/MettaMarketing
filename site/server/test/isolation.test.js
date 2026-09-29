@@ -29,8 +29,8 @@ before(async () => {
   server = await startTestServer();
   ctx = server.ctx;
   db = server.db;
-  const A = createClientWithBrand(ctx, { name: "Aurora Pagamentos", brandName: "Aurora" });
-  const B = createClientWithBrand(ctx, { name: "Boreal", brandName: "Boreal" });
+  const A = await createClientWithBrand(ctx, { name: "Aurora Pagamentos", brandName: "Aurora" });
+  const B = await createClientWithBrand(ctx, { name: "Boreal", brandName: "Boreal" });
   Object.assign(f, { clientA: A.clientId, brandA: A.brandId, clientB: B.clientId, brandB: B.brandId });
   u.admin = await createUser(ctx, { role: "admin" });
   u.managerA = await createUser(ctx, { role: "manager" });
@@ -40,10 +40,10 @@ before(async () => {
   u.finance = await createUser(ctx, { role: "finance" });
   u.clientA = await createUser(ctx, { role: "client", clientId: A.clientId });
   u.clientB = await createUser(ctx, { role: "client", clientId: B.clientId });
-  addStaffAccess(ctx, u.managerA.id, A.clientId);
-  addStaffAccess(ctx, u.managerB.id, B.clientId);
-  f.projectA = createProject(ctx, { brandId: A.brandId, name: "Identidade Aurora", memberIds: [u.designerA.id] }).id;
-  f.projectB = createProject(ctx, { brandId: B.brandId, name: "Conteúdo Boreal", memberIds: [u.designerOut.id] }).id;
+  await addStaffAccess(ctx, u.managerA.id, A.clientId);
+  await addStaffAccess(ctx, u.managerB.id, B.clientId);
+  f.projectA = (await createProject(ctx, { brandId: A.brandId, name: "Identidade Aurora", memberIds: [u.designerA.id] })).id;
+  f.projectB = (await createProject(ctx, { brandId: B.brandId, name: "Conteúdo Boreal", memberIds: [u.designerOut.id] })).id;
 
   const image = await png();
   f.logo = await insertMaterial(ctx, {
@@ -84,18 +84,18 @@ before(async () => {
   f.logoB = await insertMaterial(ctx, { brandId: B.brandId, projectId: f.projectB, title: "Logo Boreal", visibility: "released", createdBy: u.admin.id });
   // a thumbnail row so preview routes have something to serve
   const stored = await ctx.storage.putBuffer(image);
-  db.run(
+  await db.run(
     "INSERT INTO file_renditions (file_id, kind, storage_key, mime, width, height, size_bytes, created_at) VALUES (?, 'thumb', ?, 'image/webp', 64, 64, ?, ?)",
     [f.logo.files[0].id, stored.key, stored.size, now()],
   );
   f.kit = newId("kit");
-  db.run("INSERT INTO kits (id, brand_id, name, kind, status, created_at, updated_at) VALUES (?, ?, 'Kit Aurora', 'brand_kit', 'released', ?, ?)", [
+  await db.run("INSERT INTO kits (id, brand_id, name, kind, status, created_at, updated_at) VALUES (?, ?, 'Kit Aurora', 'brand_kit', 'released', ?, ?)", [
     f.kit,
     A.brandId,
     now(),
     now(),
   ]);
-  db.run("INSERT INTO kit_items (kit_id, material_id, sort_order) VALUES (?, ?, 10)", [f.kit, f.logo.material.id]);
+  await db.run("INSERT INTO kit_items (kit_id, material_id, sort_order) VALUES (?, ?, 10)", [f.kit, f.logo.material.id]);
   for (const [key, user] of Object.entries(u)) a[key] = await login(server, { email: user.email });
 });
 
@@ -134,7 +134,7 @@ describe("client B against client A", () => {
     const scopes = [
       { type: "selection", fileIds: [fileId()] },
       { type: "selection", materialIds: [logoId()] },
-      { type: "category", brandId: f.brandA, categoryId: categoryId(ctx, "logotipo") },
+      { type: "category", brandId: f.brandA, categoryId: await categoryId(ctx, "logotipo") },
       { type: "brand_kit", brandId: f.brandA },
       { type: "carousel", materialId: f.post.material.id },
       { type: "project", projectId: f.projectA },
@@ -192,7 +192,7 @@ describe("staff scope", () => {
     const created = await d.post("/api/materials", {
       brandId: f.brandA,
       projectId: f.projectA,
-      categoryId: categoryId(ctx, "logotipo"),
+      categoryId: await categoryId(ctx, "logotipo"),
       title: "Intruso",
       files: [{ uploadId: up.body.upload.id }],
     });
@@ -212,7 +212,7 @@ describe("staff scope", () => {
     const res = await d.post("/api/materials", {
       brandId: f.brandA,
       projectId: f.projectA,
-      categoryId: categoryId(ctx, "logotipo"),
+      categoryId: await categoryId(ctx, "logotipo"),
       title: "Com upload alheio",
       files: [{ uploadId: foreignUpload.body.upload.id }],
     });
@@ -235,7 +235,7 @@ describe("staff scope", () => {
     assert.ok(preview.body.blockers.some((b) => /marcas diferentes/.test(b)));
     const release = await a.admin.post("/api/releases", { materialIds: [f.draft.material.id, f.logoB.material.id], notifyApp: true });
     assert.equal(release.status, 409);
-    assert.equal(db.get("SELECT visibility FROM materials WHERE id = ?", [f.draft.material.id]).visibility, "draft", "nothing applied");
+    assert.equal((await db.get("SELECT visibility FROM materials WHERE id = ?", [f.draft.material.id])).visibility, "draft", "nothing applied");
   });
 
   test("finance never reaches materials or files", async () => {
@@ -264,7 +264,7 @@ describe("responsible person (ownerId)", () => {
     const toOutsider = await d.patch(`/api/materials/${logoId()}`, { ownerId: u.designerOut.id });
     assert.equal(toOutsider.status, 422);
     assert.equal(toOutsider.body.error.fields.ownerId, OUTSIDER);
-    assert.equal(db.get("SELECT owner_id FROM materials WHERE id = ?", [logoId()]).owner_id, u.designerA.id);
+    assert.equal((await db.get("SELECT owner_id FROM materials WHERE id = ?", [logoId()])).owner_id, u.designerA.id);
     assert.equal((await a.designerOut.get(`/api/materials/${logoId()}`)).status, 404, "still no access");
     assert.equal((await a.designerOut.get(`/api/materials/${logoId()}/history`)).status, 404);
 
@@ -284,7 +284,7 @@ describe("responsible person (ownerId)", () => {
     const created = await d.post("/api/materials", {
       brandId: f.brandA,
       projectId: f.projectA,
-      categoryId: categoryId(ctx, "logotipo"),
+      categoryId: await categoryId(ctx, "logotipo"),
       title: "Dono de fora",
       ownerId: u.designerOut.id,
       files: [{ uploadId: up.body.upload.id }],
@@ -296,16 +296,16 @@ describe("responsible person (ownerId)", () => {
   test("people who already work on the client can be responsible", async () => {
     // a manager with access to the client, an admin, a designer of a project of the brand
     const designerA2 = await createUser(ctx, { role: "designer", name: "Outra designer" });
-    createProject(ctx, { brandId: f.brandA, name: "Conteúdo Aurora", memberIds: [designerA2.id] });
+    await createProject(ctx, { brandId: f.brandA, name: "Conteúdo Aurora", memberIds: [designerA2.id] });
     for (const ownerId of [u.managerA.id, u.admin.id, designerA2.id]) {
       const res = await a.designerA.patch(`/api/materials/${f.draft.material.id}`, { ownerId });
       assert.equal(res.status, 200, `${ownerId} ${JSON.stringify(res.body)}`);
-      assert.equal(db.get("SELECT owner_id FROM materials WHERE id = ?", [f.draft.material.id]).owner_id, ownerId);
+      assert.equal((await db.get("SELECT owner_id FROM materials WHERE id = ?", [f.draft.material.id])).owner_id, ownerId);
       // put it back so the designer keeps write access through ownership
-      db.run("UPDATE materials SET owner_id = ? WHERE id = ?", [u.designerA.id, f.draft.material.id]);
+      await db.run("UPDATE materials SET owner_id = ? WHERE id = ?", [u.designerA.id, f.draft.material.id]);
     }
     const bulk = await a.managerA.post("/api/materials/bulk", { ids: [f.draft.material.id], action: "set_owner", value: u.managerA.id });
     assert.equal(bulk.body.updated, 1);
-    db.run("UPDATE materials SET owner_id = ? WHERE id = ?", [u.designerA.id, f.draft.material.id]);
+    await db.run("UPDATE materials SET owner_id = ? WHERE id = ?", [u.designerA.id, f.draft.material.id]);
   });
 });

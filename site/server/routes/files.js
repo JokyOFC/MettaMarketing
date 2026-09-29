@@ -24,8 +24,8 @@ export default function filesRoutes(ctx) {
 
   const userAgent = (req) => String(req.get("user-agent") ?? "").slice(0, 300) || null;
 
-  function recordDownload(req, entry) {
-    db.run(
+  async function recordDownload(req, entry) {
+    await db.run(
       `INSERT INTO download_events (id, user_id, client_id, brand_id, material_id, version_id, file_id, zip_job_id, kind, scope, ip, user_agent, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -48,10 +48,10 @@ export default function filesRoutes(ctx) {
 
   // Whether the viewer may see the records of another person's ZIP job
   // (its client is in their scope and their role sees materials).
-  function zipVisibleTo(req, jobId) {
-    const job = db.get("SELECT client_id FROM zip_jobs WHERE id = ?", [jobId]);
+  async function zipVisibleTo(req, jobId) {
+    const job = await db.get("SELECT client_id FROM zip_jobs WHERE id = ?", [jobId]);
     if (!job) return false;
-    const scope = getScope(req);
+    const scope = await getScope(req);
     return scope.materials && (scope.all || Boolean(job.client_id && scope.clientIds?.has(job.client_id)));
   }
 
@@ -63,8 +63,8 @@ export default function filesRoutes(ctx) {
   router.get("/api/files/:id/preview/:kind", requireAuth, requireCap(...VIEW), async (req, res) => {
     const kind = req.params.kind;
     if (!PREVIEW_KINDS.has(kind)) throw notFound();
-    const file = assertFile(req, req.params.id);
-    const rendition = db.get("SELECT * FROM file_renditions WHERE file_id = ? AND kind = ?", [file.id, kind]);
+    const file = await assertFile(req, req.params.id);
+    const rendition = await db.get("SELECT * FROM file_renditions WHERE file_id = ? AND kind = ?", [file.id, kind]);
     if (!rendition) throw notFound("A prévia deste arquivo ainda não está disponível.");
     await sendStoredFile(req, res, storage, rendition.storage_key, {
       mime: rendition.mime,
@@ -80,9 +80,9 @@ export default function filesRoutes(ctx) {
   // An inline PDF is the original document itself, so clients need the
   // download permission for it; videos and audio stay watchable.
   router.get("/api/files/:id/stream", requireAuth, requireCap(...VIEW), async (req, res) => {
-    const peek = assertFile(req, req.params.id);
+    const peek = await assertFile(req, req.params.id);
     if (!STREAM_KINDS.has(peek.media_kind)) throw notFound("Este formato não tem visualização em fluxo.");
-    const file = peek.media_kind === "pdf" ? assertFile(req, req.params.id, { download: true }) : peek;
+    const file = peek.media_kind === "pdf" ? await assertFile(req, req.params.id, { download: true }) : peek;
     await sendStoredFile(req, res, storage, file.storage_key, {
       mime: file.mime,
       size: file.size_bytes,
@@ -98,7 +98,7 @@ export default function filesRoutes(ctx) {
   // reaches the page as a clear message instead of a failed browser download.
   router.post("/api/downloads/link", requireAuth, requireCap(...VIEW), async (req, res) => {
     const { fileId } = parse(z.object({ fileId: z.string().trim().min(1).max(64) }), req.body);
-    const file = assertFile(req, fileId, { download: true });
+    const file = await assertFile(req, fileId, { download: true });
     if (!(await storage.stat(file.storage_key))) throw notFound(FILE_MISSING_MESSAGE);
     const link = signer.issue({ t: "file", id: file.id, u: req.user.id }, LINK_TTL_SECONDS);
     res.json({ url: link.url, expiresAt: link.expiresAt });
@@ -114,17 +114,17 @@ export default function filesRoutes(ctx) {
     if (payload.u !== req.user.id) {
       // Someone outside the record's scope learns nothing (404, PLATFORM.md
       // §2 rule 2); a person who can see it is told the link is personal.
-      if (payload.t === "file") assertFile(req, payload.id);
-      else if (!zipVisibleTo(req, payload.id)) throw notFound();
+      if (payload.t === "file") await assertFile(req, payload.id);
+      else if (!await zipVisibleTo(req, payload.id)) throw notFound();
       throw forbidden("Este link de download foi gerado para outra pessoa. Peça o seu pela plataforma.");
     }
 
     if (payload.t === "file") {
-      const file = assertFile(req, payload.id, { download: true });
+      const file = await assertFile(req, payload.id, { download: true });
       // only a download that can really be served is recorded
       if (!(await storage.stat(file.storage_key))) throw notFound(FILE_MISSING_MESSAGE);
       if (isFirstRequest(req))
-        recordDownload(req, {
+        await recordDownload(req, {
           kind: "file",
           scope: "file",
           clientId: file.material.client_id,
@@ -143,7 +143,7 @@ export default function filesRoutes(ctx) {
       return;
     }
 
-    const job = db.get("SELECT * FROM zip_jobs WHERE id = ? AND user_id = ?", [payload.id, req.user.id]);
+    const job = await db.get("SELECT * FROM zip_jobs WHERE id = ? AND user_id = ?", [payload.id, req.user.id]);
     if (!job) throw notFound();
     try {
       assertZipReady(job);
@@ -157,7 +157,7 @@ export default function filesRoutes(ctx) {
       throw expired(problem);
     }
     if (isFirstRequest(req))
-      recordDownload(req, {
+      await recordDownload(req, {
         kind: "zip",
         scope: job.scope,
         clientId: job.client_id,

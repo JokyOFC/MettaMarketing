@@ -1,13 +1,15 @@
 // Test harness: boots the API on an ephemeral port with a temporary
-// DATA_DIR and offers direct-DB fixtures plus an HTTP session helper.
+// DATA_DIR and its own MySQL database, and offers direct-DB fixtures plus an
+// HTTP session helper.
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
 import { createApp, createContext } from "../app.js";
-import { findOnPath, loadConfig } from "../config.js";
+import { ROOT_DIR, findOnPath, loadConfig } from "../config.js";
+import { dropDatabase, listDatabases } from "../db/connection.js";
 import { hashPassword } from "../lib/auth.js";
 import { newId } from "../lib/ids.js";
 import { extOf, kindForExt, mimeFor } from "../lib/media.js";
@@ -15,15 +17,69 @@ import { now } from "../lib/time.js";
 
 export const TEST_PASSWORD = "senha-de-teste-123";
 
+// ------------------------------------------------------------------ MySQL
+// Each test server gets its own database (metta_test_<time>_<pid>_<n>) on the
+// server of TEST_DATABASE_URL or DATABASE_URL — taken from the environment or
+// read from site/.env without loading the rest of it (dev settings such as
+// ASSINAVELOX_* must not leak into tests). The user needs CREATE and DROP on
+// metta_test_* databases.
+const TEST_DB_PREFIX = "metta_test_";
+const STALE_MS = 6 * 60 * 60 * 1000;
+
+function envFileValue(name) {
+  const file = join(ROOT_DIR, ".env");
+  if (!existsSync(file)) return null;
+  for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
+    if (!match || match[1] !== name) continue;
+    return match[2].replace(/^(["'])(.*)\1$/, "$2") || null;
+  }
+  return null;
+}
+
+const baseDatabaseUrl = () =>
+  process.env.TEST_DATABASE_URL || envFileValue("TEST_DATABASE_URL") || process.env.DATABASE_URL || envFileValue("DATABASE_URL");
+
+let dbCounter = 0;
+let staleSweep = null;
+async function testDatabaseUrl() {
+  const base = baseDatabaseUrl();
+  if (!base) throw new Error("Defina DATABASE_URL (ou TEST_DATABASE_URL) no site/.env para rodar os testes com MySQL.");
+  // Databases left behind by an interrupted run are dropped after 6 hours.
+  staleSweep ??= listDatabases(base, TEST_DB_PREFIX)
+    .then((names) =>
+      Promise.all(
+        names
+          .filter((name) => {
+            const born = parseInt(name.slice(TEST_DB_PREFIX.length).split("_")[0], 36);
+            return Number.isFinite(born) && Date.now() - born > STALE_MS;
+          })
+          .map((name) => {
+            const url = new URL(base);
+            url.pathname = `/${name}`;
+            return dropDatabase(url.toString()).catch(() => {});
+          }),
+      ),
+    )
+    .catch(() => {});
+  await staleSweep;
+  const url = new URL(base);
+  url.pathname = `/${TEST_DB_PREFIX}${Date.now().toString(36)}_${process.pid}_${(dbCounter += 1)}`;
+  return url.toString();
+}
+
 /**
  * startTestServer(overrides) -> { url, ctx, db, close }
  * overrides are loadConfig overrides (e.g. { mpApiBase, mailTransport }).
  */
 export async function startTestServer(overrides = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), "metta-test-"));
+  const databaseUrl = await testDatabaseUrl();
   const config = loadConfig({
     nodeEnv: "test",
     dataDir,
+    databaseUrl,
+    dbPoolSize: 5,
     appSecret: randomBytes(32).toString("hex"),
     appUrl: "http://127.0.0.1:5173",
     mpAccessToken: null,
@@ -35,7 +91,7 @@ export async function startTestServer(overrides = {}) {
     avWebhookSecret: null,
     ...overrides,
   });
-  const ctx = createContext(config);
+  const ctx = await createContext(config);
   const app = createApp(ctx);
   const server = await new Promise((resolve, reject) => {
     const instance = app.listen(0, "127.0.0.1", () => resolve(instance));
@@ -58,7 +114,8 @@ export async function startTestServer(overrides = {}) {
       });
       await ctx.jobs?.stop();
       await ctx.mailer.idle();
-      ctx.db.close();
+      await ctx.db.close();
+      await dropDatabase(databaseUrl).catch(() => {});
       rmSync(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     },
   };
@@ -74,29 +131,29 @@ export async function createUser(ctx, { role = "admin", clientId = null, email, 
   const id = newId("usr");
   const at = now();
   const address = (email ?? `${role}-${unique()}@example.test`).toLowerCase();
-  ctx.db.run(
+  await ctx.db.run(
     `INSERT INTO users (id, email, name, role, client_id, password_hash, status, job_title, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, address, name ?? `Pessoa ${role}`, role, role === "client" ? clientId : null, status === "invited" ? null : await hashPassword(password), status, jobTitle, at, at],
   );
-  return { ...ctx.db.get("SELECT * FROM users WHERE id = ?", [id]), password };
+  return { ...await ctx.db.get("SELECT * FROM users WHERE id = ?", [id]), password };
 }
 
 /** -> { client, brand, clientId, brandId } */
-export function createClientWithBrand(ctx, { name, brandName } = {}) {
+export async function createClientWithBrand(ctx, { name, brandName } = {}) {
   const at = now();
   const clientId = newId("cli");
   const brandId = newId("brd");
   const clientName = name ?? `Cliente ${unique()}`;
   const brand = brandName ?? clientName;
-  ctx.db.run("INSERT INTO clients (id, name, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)", [clientId, clientName, at, at]);
+  await ctx.db.run("INSERT INTO clients (id, name, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)", [clientId, clientName, at, at]);
   const slug = brand
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "") || "marca";
-  ctx.db.run("INSERT INTO brands (id, client_id, name, slug, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?)", [
+  await ctx.db.run("INSERT INTO brands (id, client_id, name, slug, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?)", [
     brandId,
     clientId,
     brand,
@@ -105,18 +162,18 @@ export function createClientWithBrand(ctx, { name, brandName } = {}) {
     at,
   ]);
   return {
-    client: ctx.db.get("SELECT * FROM clients WHERE id = ?", [clientId]),
-    brand: ctx.db.get("SELECT * FROM brands WHERE id = ?", [brandId]),
+    client: await ctx.db.get("SELECT * FROM clients WHERE id = ?", [clientId]),
+    brand: await ctx.db.get("SELECT * FROM brands WHERE id = ?", [brandId]),
     clientId,
     brandId,
   };
 }
 
 /** Extra brand for an existing client. */
-export function createBrand(ctx, clientId, name = `Marca ${unique()}`) {
+export async function createBrand(ctx, clientId, name = `Marca ${unique()}`) {
   const id = newId("brd");
   const at = now();
-  ctx.db.run("INSERT INTO brands (id, client_id, name, slug, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?)", [
+  await ctx.db.run("INSERT INTO brands (id, client_id, name, slug, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?)", [
     id,
     clientId,
     name,
@@ -124,39 +181,39 @@ export function createBrand(ctx, clientId, name = `Marca ${unique()}`) {
     at,
     at,
   ]);
-  return ctx.db.get("SELECT * FROM brands WHERE id = ?", [id]);
+  return await ctx.db.get("SELECT * FROM brands WHERE id = ?", [id]);
 }
 
-export function addStaffAccess(ctx, userId, clientId) {
-  ctx.db.run("INSERT OR IGNORE INTO staff_client_access (user_id, client_id, granted_at) VALUES (?, ?, ?)", [userId, clientId, now()]);
+export async function addStaffAccess(ctx, userId, clientId) {
+  await ctx.db.run("INSERT IGNORE INTO staff_client_access (user_id, client_id, granted_at) VALUES (?, ?, ?)", [userId, clientId, now()]);
 }
 
 /** -> project row. memberIds join as 'designer'. */
-export function createProject(ctx, { brandId, name, memberIds = [], includesEditables = false, status = "in_progress" } = {}) {
+export async function createProject(ctx, { brandId, name, memberIds = [], includesEditables = false, status = "in_progress" } = {}) {
   const id = newId("prj");
   const at = now();
-  ctx.db.run(
+  await ctx.db.run(
     "INSERT INTO projects (id, brand_id, name, status, includes_editables, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     [id, brandId, name ?? `Projeto ${unique()}`, status, includesEditables ? 1 : 0, at, at],
   );
   for (const userId of memberIds)
-    ctx.db.run("INSERT INTO project_members (project_id, user_id, role, added_at) VALUES (?, ?, 'designer', ?)", [id, userId, at]);
-  return ctx.db.get("SELECT * FROM projects WHERE id = ?", [id]);
+    await ctx.db.run("INSERT INTO project_members (project_id, user_id, role, added_at) VALUES (?, ?, 'designer', ?)", [id, userId, at]);
+  return await ctx.db.get("SELECT * FROM projects WHERE id = ?", [id]);
 }
 
-export const categoryId = (ctx, slug) => ctx.db.get("SELECT id FROM categories WHERE slug = ?", [slug])?.id;
+export const categoryId = async (ctx, slug) => (await ctx.db.get("SELECT id FROM categories WHERE slug = ?", [slug]))?.id;
 
 /** Stores a buffer as an upload row owned by userId. -> upload row */
 export async function createUpload(ctx, userId, { buffer, filename }) {
   const stored = await ctx.storage.putBuffer(buffer);
   const ext = extOf(filename);
   const id = newId("upl");
-  ctx.db.run(
+  await ctx.db.run(
     `INSERT INTO uploads (id, user_id, original_name, ext, mime, size_bytes, sha256, storage_key, media_kind, status, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?)`,
     [id, userId, filename, ext, mimeFor(ext), stored.size, stored.sha256, stored.key, kindForExt(ext) ?? "other", now()],
   );
-  return ctx.db.get("SELECT * FROM uploads WHERE id = ?", [id]);
+  return await ctx.db.get("SELECT * FROM uploads WHERE id = ?", [id]);
 }
 
 /**
@@ -173,7 +230,7 @@ export async function insertMaterial(ctx, opts) {
   const versionId = newId("ver");
   const released = opts.visibility === "released";
   const createdBy = opts.createdBy;
-  db.run(
+  await db.run(
     `INSERT INTO materials (id, kind, brand_id, project_id, category_id, title, owner_id, visibility, download_enabled,
        editable_included, requires_approval, approval_status, current_version_id, released_version_id, released_at,
        archived_at, created_by, created_at, updated_at)
@@ -183,7 +240,7 @@ export async function insertMaterial(ctx, opts) {
       opts.kind ?? "asset",
       opts.brandId,
       opts.projectId ?? null,
-      categoryId(ctx, opts.categorySlug ?? "logotipo"),
+      await categoryId(ctx, opts.categorySlug ?? "logotipo"),
       opts.title ?? "Material de teste",
       opts.ownerId ?? createdBy,
       opts.visibility ?? "draft",
@@ -201,13 +258,13 @@ export async function insertMaterial(ctx, opts) {
     ],
   );
   if ((opts.kind ?? "asset") === "post")
-    db.run("INSERT INTO post_details (material_id, network, format, planned_date) VALUES (?, ?, ?, ?)", [
+    await db.run("INSERT INTO post_details (material_id, network, format, planned_date) VALUES (?, ?, ?, ?)", [
       id,
       opts.network ?? "instagram",
       opts.format ?? "carrossel",
       opts.plannedDate ?? null,
     ]);
-  db.run(
+  await db.run(
     `INSERT INTO material_versions (id, material_id, number, status, created_by, created_at, released_at, released_by)
      VALUES (?, ?, 1, ?, ?, ?, ?, ?)`,
     [versionId, id, released ? "released" : "draft", createdBy, at, released ? at : null, released ? createdBy : null],
@@ -217,7 +274,7 @@ export async function insertMaterial(ctx, opts) {
     const stored = await ctx.storage.putBuffer(file.buffer ?? Buffer.from("x"));
     const ext = extOf(file.filename);
     const fileId = newId("fil");
-    db.run(
+    await db.run(
       `INSERT INTO material_files (id, version_id, material_id, role, position, original_name, display_name, ext, mime,
          size_bytes, sha256, storage_key, media_kind, preview_status, font_distributable, created_by, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unsupported', ?, ?, ?)`,
@@ -240,11 +297,11 @@ export async function insertMaterial(ctx, opts) {
         at,
       ],
     );
-    files.push(db.get("SELECT * FROM material_files WHERE id = ?", [fileId]));
+    files.push(await db.get("SELECT * FROM material_files WHERE id = ?", [fileId]));
   }
   return {
-    material: db.get("SELECT * FROM materials WHERE id = ?", [id]),
-    version: db.get("SELECT * FROM material_versions WHERE id = ?", [versionId]),
+    material: await db.get("SELECT * FROM materials WHERE id = ?", [id]),
+    version: await db.get("SELECT * FROM material_versions WHERE id = ?", [versionId]),
     files,
   };
 }
@@ -403,6 +460,6 @@ export async function waitFor(fn, { timeout = 5000, interval = 25 } = {}) {
 }
 
 // Latest outbox e-mail for an address (tests read invite/reset links here).
-export function lastEmail(ctx, to) {
-  return ctx.db.get("SELECT * FROM email_outbox WHERE to_email = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", [to.toLowerCase()]);
+export async function lastEmail(ctx, to) {
+  return await ctx.db.get("SELECT * FROM email_outbox WHERE to_email = ? ORDER BY created_at DESC, seq DESC LIMIT 1", [to.toLowerCase()]);
 }

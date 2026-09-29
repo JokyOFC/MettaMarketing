@@ -296,17 +296,17 @@ const BRIEFING_SELECT = `SELECT br.*, b.client_id AS client_id, b.name AS brand_
   LEFT JOIN users su ON su.id = br.submitted_by
   LEFT JOIN users ru ON ru.id = br.reviewed_by`;
 
-const loadRow = (db, id) => db.get(`${BRIEFING_SELECT} WHERE br.id = ?`, [id]);
+const loadRow = async (db, id) => await db.get(`${BRIEFING_SELECT} WHERE br.id = ?`, [id]);
 
 // Loads a briefing the viewer may see, or throws 404.
-function assertBriefing(req, id) {
-  const row = typeof id === "string" && id.length <= 64 ? loadRow(req.ctx.db, id) : null;
+async function assertBriefing(req, id) {
+  const row = typeof id === "string" && id.length <= 64 ? await loadRow(req.ctx.db, id) : null;
   if (!row) throw notFound();
   if (req.user.role === "client") {
     if (row.client_id !== req.user.client_id || row.status === "draft") throw notFound();
     return row;
   }
-  assertBrand(req, row.brand_id); // 404 outside the staff member's scope
+  await assertBrand(req, row.brand_id); // 404 outside the staff member's scope
   return row;
 }
 
@@ -371,12 +371,12 @@ function dateLabel(value) {
 }
 
 // Project id from the request -> row (must belong to the brand), null or undefined.
-function resolveProject(req, projectId, brandId) {
+async function resolveProject(req, projectId, brandId) {
   if (projectId === undefined) return undefined;
   if (projectId === null || projectId === "") return null;
   let project;
   try {
-    project = assertProject(req, projectId);
+    project = await assertProject(req, projectId);
   } catch {
     throw validation({ projectId: "Escolha um projeto desta marca." });
   }
@@ -386,19 +386,19 @@ function resolveProject(req, projectId, brandId) {
 
 // Team members who follow a briefing: its author, the client's managers and
 // the members of the linked project. Falls back to admins.
-function staffFollowers(db, row) {
+async function staffFollowers(db, row) {
   const ids = new Set();
-  const author = row.created_by ? db.get("SELECT id, role, status FROM users WHERE id = ?", [row.created_by]) : null;
+  const author = row.created_by ? await db.get("SELECT id, role, status FROM users WHERE id = ?", [row.created_by]) : null;
   if (author && author.role !== "client" && author.status === "active") ids.add(author.id);
-  for (const id of managerIdsForClient(db, row.client_id)) ids.add(id);
+  for (const id of await managerIdsForClient(db, row.client_id)) ids.add(id);
   if (row.project_id)
-    for (const member of db.all(
+    for (const member of await db.all(
       `SELECT pm.user_id FROM project_members pm JOIN users u ON u.id = pm.user_id
         WHERE pm.project_id = ? AND u.status = 'active'`,
       [row.project_id],
     ))
       ids.add(member.user_id);
-  if (!ids.size) for (const id of adminIds(db)) ids.add(id);
+  if (!ids.size) for (const id of await adminIds(db)) ids.add(id);
   return [...ids];
 }
 
@@ -441,7 +441,7 @@ export default function briefingsRoutes(ctx) {
     res.json({ items: BRIEFING_TEMPLATES.map(serializeTemplate) });
   });
 
-  router.get("/api/briefings", requireAuth, canView, (req, res) => {
+  router.get("/api/briefings", requireAuth, canView, async (req, res) => {
     const { page, pageSize, limit, offset } = paginate(req.query, { defaultSize: 50 });
     const where = [];
     const params = [];
@@ -468,14 +468,14 @@ export default function briefingsRoutes(ctx) {
     const q = String(req.query.q ?? "").trim().slice(0, 100);
     if (q) {
       const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
-      where.push("(br.title LIKE ? ESCAPE '\\' OR b.name LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')");
+      where.push("(br.title LIKE ? COLLATE utf8mb4_0900_ai_ci OR b.name LIKE ? COLLATE utf8mb4_0900_ai_ci OR c.name LIKE ? COLLATE utf8mb4_0900_ai_ci)");
       params.push(like, like, like);
     }
     const base = `FROM briefings br JOIN brands b ON b.id = br.brand_id JOIN clients c ON c.id = b.client_id WHERE ${where.join(" AND ")}`;
 
     // counts per status ignore the status filter (tabs show every bucket)
     const counts = Object.fromEntries(BRIEFING_STATUSES.map((status) => [status, 0]));
-    for (const row of db.all(`SELECT br.status, COUNT(*) AS n ${base} GROUP BY br.status`, params)) counts[row.status] = row.n;
+    for (const row of await db.all(`SELECT br.status, COUNT(*) AS n ${base} GROUP BY br.status`, params)) counts[row.status] = row.n;
     if (req.user.role === "client") delete counts.draft;
 
     const statuses = queryList(req.query.status).filter((status) => BRIEFING_STATUSES.includes(status));
@@ -486,24 +486,24 @@ export default function briefingsRoutes(ctx) {
       listParams.push(...statuses);
     }
     const whereSql = listWhere.join(" AND ");
-    const total = db.get(
+    const total = (await db.get(
       `SELECT COUNT(*) AS n FROM briefings br JOIN brands b ON b.id = br.brand_id JOIN clients c ON c.id = b.client_id WHERE ${whereSql}`,
       listParams,
-    ).n;
+    )).n;
     const order =
       req.user.role === "client"
         ? `CASE WHEN br.status IN ('awaiting_client', 'in_progress') THEN 0 ELSE 1 END,
            CASE WHEN br.status IN ('awaiting_client', 'in_progress') THEN COALESCE(br.due_date, '9999-12-31') END,
            COALESCE(br.submitted_at, br.sent_at, br.created_at) DESC`
         : "br.updated_at DESC, br.created_at DESC";
-    const rows = db.all(`${BRIEFING_SELECT} WHERE ${whereSql} ORDER BY ${order} LIMIT ? OFFSET ?`, [...listParams, limit, offset]);
+    const rows = await db.all(`${BRIEFING_SELECT} WHERE ${whereSql} ORDER BY ${order} LIMIT ? OFFSET ?`, [...listParams, limit, offset]);
     res.json({ items: rows.map((row) => serializeBriefing(req, row, { full: false })), total, counts, page, pageSize });
   });
 
-  router.post("/api/briefings", requireAuth, canManage, (req, res) => {
+  router.post("/api/briefings", requireAuth, canManage, async (req, res) => {
     const input = parse(createSchema, req.body);
-    const brand = assertBrand(req, input.brandId);
-    const project = resolveProject(req, input.projectId, brand.id);
+    const brand = await assertBrand(req, input.brandId);
+    const project = await resolveProject(req, input.projectId, brand.id);
     let template = null;
     if (input.templateId) {
       template = templateById(input.templateId);
@@ -514,14 +514,14 @@ export default function briefingsRoutes(ctx) {
     const questions = normalizeQuestions(input.questions ?? template?.questions ?? []);
     const id = newId("brf");
     const at = now();
-    db.tx(() => {
-      db.run(
+    await db.tx(async () => {
+      await db.run(
         `INSERT INTO briefings (id, brand_id, project_id, title, intro, questions, answers, status, due_date,
            created_by, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, '{}', 'draft', ?, ?, ?, ?)`,
         [id, brand.id, project?.id ?? null, title, input.intro ?? template?.intro ?? null, JSON.stringify(questions), input.dueDate ?? null, req.user.id, at, at],
       );
-      logActivity(req, {
+      await logActivity(req, {
         action: "briefing.created",
         entityType: "briefing",
         entityId: id,
@@ -531,16 +531,16 @@ export default function briefingsRoutes(ctx) {
         data: template ? { templateId: template.id } : null,
       });
     });
-    res.status(201).json({ briefing: detail(req, loadRow(db, id)) });
+    res.status(201).json({ briefing: detail(req, await loadRow(db, id)) });
   });
 
-  router.get("/api/briefings/:id", requireAuth, canView, (req, res) => {
-    const row = assertBriefing(req, req.params.id);
+  router.get("/api/briefings/:id", requireAuth, canView, async (req, res) => {
+    const row = await assertBriefing(req, req.params.id);
     res.json({ briefing: detail(req, row) });
   });
 
-  router.patch("/api/briefings/:id", requireAuth, canManage, (req, res) => {
-    const row = assertBriefing(req, req.params.id);
+  router.patch("/api/briefings/:id", requireAuth, canManage, async (req, res) => {
+    const row = await assertBriefing(req, req.params.id);
     const input = parse(patchSchema, req.body);
     const sets = [];
     const params = [];
@@ -558,11 +558,11 @@ export default function briefingsRoutes(ctx) {
     if (input.title !== undefined) set("title", input.title, "title");
     if (input.intro !== undefined) set("intro", input.intro, "intro");
     if (input.dueDate !== undefined) set("due_date", input.dueDate, "dueDate");
-    if (input.projectId !== undefined) set("project_id", resolveProject(req, input.projectId, row.brand_id)?.id ?? null, "projectId");
+    if (input.projectId !== undefined) set("project_id", (await resolveProject(req, input.projectId, row.brand_id))?.id ?? null, "projectId");
     if (sets.length) {
-      db.tx(() => {
-        db.run(`UPDATE briefings SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`, [...params, now(), row.id]);
-        logActivity(req, {
+      await db.tx(async () => {
+        await db.run(`UPDATE briefings SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`, [...params, now(), row.id]);
+        await logActivity(req, {
           action: "briefing.updated",
           entityType: "briefing",
           entityId: row.id,
@@ -573,17 +573,17 @@ export default function briefingsRoutes(ctx) {
         });
       });
     }
-    res.json({ briefing: detail(req, loadRow(db, row.id)) });
+    res.json({ briefing: detail(req, await loadRow(db, row.id)) });
   });
 
-  router.delete("/api/briefings/:id", requireAuth, canManage, (req, res) => {
-    const row = assertBriefing(req, req.params.id);
+  router.delete("/api/briefings/:id", requireAuth, canManage, async (req, res) => {
+    const row = await assertBriefing(req, req.params.id);
     if (row.status !== "draft" && row.status !== "awaiting_client")
       throw conflict("Este briefing já tem respostas do cliente e não pode ser excluído.");
-    db.tx(() => {
-      db.run("DELETE FROM briefings WHERE id = ?", [row.id]);
-      db.run("DELETE FROM notifications WHERE entity_type = 'briefing' AND entity_id = ?", [row.id]);
-      logActivity(req, {
+    await db.tx(async () => {
+      await db.run("DELETE FROM briefings WHERE id = ?", [row.id]);
+      await db.run("DELETE FROM notifications WHERE entity_type = 'briefing' AND entity_id = ?", [row.id]);
+      await logActivity(req, {
         action: "briefing.deleted",
         entityType: "briefing",
         entityId: row.id,
@@ -597,8 +597,8 @@ export default function briefingsRoutes(ctx) {
 
   // draft -> awaiting_client (notifies the client); while the client has not
   // answered yet, sending again is a reminder.
-  router.post("/api/briefings/:id/send", requireAuth, canManage, (req, res) => {
-    const row = assertBriefing(req, req.params.id);
+  router.post("/api/briefings/:id/send", requireAuth, canManage, async (req, res) => {
+    const row = await assertBriefing(req, req.params.id);
     if (row.status === "submitted" || row.status === "reviewed")
       throw conflict("O cliente já enviou as respostas deste briefing.");
     const questions = parseJson(row.questions, []);
@@ -607,14 +607,14 @@ export default function briefingsRoutes(ctx) {
       normalizeQuestions(questions); // stored lists are always valid; re-check before the client sees it
     }
     const reminder = row.status !== "draft";
-    const recipients = clientUserIds(db, row.client_id);
+    const recipients = await clientUserIds(db, row.client_id);
     const due = dateLabel(row.due_date);
     const at = now();
     let reach;
-    db.tx(() => {
+    await db.tx(async () => {
       if (!reminder)
-        db.run("UPDATE briefings SET status = 'awaiting_client', sent_at = ?, updated_at = ? WHERE id = ? AND status = 'draft'", [at, at, row.id]);
-      const notices = notify(req, recipients, {
+        await db.run("UPDATE briefings SET status = 'awaiting_client', sent_at = ?, updated_at = ? WHERE id = ? AND status = 'draft'", [at, at, row.id]);
+      const notices = await notify(req, recipients, {
         type: reminder ? "briefing.reminder" : "briefing.sent",
         title: reminder ? `Lembrete: briefing "${row.title}"` : `Novo briefing: ${row.title}`,
         body: reminder
@@ -632,8 +632,8 @@ export default function briefingsRoutes(ctx) {
           "As respostas ficam salvas automaticamente enquanto você preenche.",
         ],
       });
-      reach = noticeReach(req, notices);
-      logActivity(req, {
+      reach = await noticeReach(req, notices);
+      await logActivity(req, {
         action: reminder ? "briefing.reminded" : "briefing.sent",
         entityType: "briefing",
         entityId: row.id,
@@ -646,12 +646,12 @@ export default function briefingsRoutes(ctx) {
     });
     // recipients: client users notified; emailConfigured/emailRecipients say
     // whether an e-mail really goes out (never assumed by the interface).
-    res.json({ briefing: detail(req, loadRow(db, row.id)), recipients: recipients.length, reminder, ...reach });
+    res.json({ briefing: detail(req, await loadRow(db, row.id)), recipients: recipients.length, reminder, ...reach });
   });
 
   // Client answers: autosave (submit false) or final submission.
-  router.put("/api/briefings/:id/answers", requireAuth, requireCap("portal.access"), (req, res) => {
-    const row = assertBriefing(req, req.params.id);
+  router.put("/api/briefings/:id/answers", requireAuth, requireCap("portal.access"), async (req, res) => {
+    const row = await assertBriefing(req, req.params.id);
     const input = parse(answersSchema, req.body);
     if (!OPEN_FOR_CLIENT.has(row.status))
       throw conflict(
@@ -662,8 +662,8 @@ export default function briefingsRoutes(ctx) {
     const questions = parseJson(row.questions, []);
     const answers = cleanAnswers(questions, input.answers, { submit: input.submit });
     const at = now();
-    db.tx(() => {
-      const { changes } = db.run(
+    await db.tx(async () => {
+      const { changes } = await db.run(
         `UPDATE briefings SET answers = ?, status = ?, updated_at = ?,
            submitted_at = CASE WHEN ? THEN ? ELSE submitted_at END,
            submitted_by = CASE WHEN ? THEN ? ELSE submitted_by END
@@ -672,7 +672,7 @@ export default function briefingsRoutes(ctx) {
       );
       if (!changes) throw conflict();
       if (input.submit) {
-        notify(req, staffFollowers(db, row), {
+        await notify(req, await staffFollowers(db, row), {
           type: "briefing.submitted",
           title: `Briefing respondido: ${row.title}`,
           body: `${req.user.name} (${row.client_name}) enviou as respostas.`,
@@ -686,7 +686,7 @@ export default function briefingsRoutes(ctx) {
             ["Marca", row.brand_name],
           ],
         });
-        logActivity(req, {
+        await logActivity(req, {
           action: "briefing.submitted",
           entityType: "briefing",
           entityId: row.id,
@@ -697,16 +697,16 @@ export default function briefingsRoutes(ctx) {
         });
       }
     });
-    res.json({ briefing: detail(req, loadRow(db, row.id)), savedAt: at });
+    res.json({ briefing: detail(req, await loadRow(db, row.id)), savedAt: at });
   });
 
-  router.post("/api/briefings/:id/review", requireAuth, canManage, (req, res) => {
-    const row = assertBriefing(req, req.params.id);
+  router.post("/api/briefings/:id/review", requireAuth, canManage, async (req, res) => {
+    const row = await assertBriefing(req, req.params.id);
     if (row.status !== "submitted") throw conflict("Só é possível revisar um briefing respondido.");
     const at = now();
-    db.tx(() => {
-      db.run("UPDATE briefings SET status = 'reviewed', reviewed_at = ?, reviewed_by = ?, updated_at = ? WHERE id = ?", [at, req.user.id, at, row.id]);
-      logActivity(req, {
+    await db.tx(async () => {
+      await db.run("UPDATE briefings SET status = 'reviewed', reviewed_at = ?, reviewed_by = ?, updated_at = ? WHERE id = ?", [at, req.user.id, at, row.id]);
+      await logActivity(req, {
         action: "briefing.reviewed",
         entityType: "briefing",
         entityId: row.id,
@@ -716,22 +716,22 @@ export default function briefingsRoutes(ctx) {
         visibility: "client",
       });
     });
-    res.json({ briefing: detail(req, loadRow(db, row.id)) });
+    res.json({ briefing: detail(req, await loadRow(db, row.id)) });
   });
 
-  router.post("/api/briefings/:id/reopen", requireAuth, canManage, (req, res) => {
-    const row = assertBriefing(req, req.params.id);
+  router.post("/api/briefings/:id/reopen", requireAuth, canManage, async (req, res) => {
+    const row = await assertBriefing(req, req.params.id);
     if (row.status !== "submitted" && row.status !== "reviewed")
       throw conflict("Só é possível reabrir um briefing que já foi respondido.");
     const { message } = parse(reopenSchema, req.body ?? {});
     const at = now();
-    db.tx(() => {
-      db.run(
+    await db.tx(async () => {
+      await db.run(
         `UPDATE briefings SET status = 'in_progress', submitted_at = NULL, submitted_by = NULL,
            reviewed_at = NULL, reviewed_by = NULL, updated_at = ? WHERE id = ?`,
         [at, row.id],
       );
-      notify(req, clientUserIds(db, row.client_id), {
+      await notify(req, await clientUserIds(db, row.client_id), {
         type: "briefing.reopened",
         title: `Briefing reaberto: ${row.title}`,
         body: message ?? "A equipe Metta reabriu o briefing para você revisar ou completar as respostas.",
@@ -741,7 +741,7 @@ export default function briefingsRoutes(ctx) {
         email: true,
         actionLabel: "Abrir briefing",
       });
-      logActivity(req, {
+      await logActivity(req, {
         action: "briefing.reopened",
         entityType: "briefing",
         entityId: row.id,
@@ -752,7 +752,7 @@ export default function briefingsRoutes(ctx) {
         visibility: "client",
       });
     });
-    res.json({ briefing: detail(req, loadRow(db, row.id)) });
+    res.json({ briefing: detail(req, await loadRow(db, row.id)) });
   });
 
   return router;

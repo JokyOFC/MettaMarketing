@@ -2,7 +2,7 @@
 // End-to-end proof of the 12 acceptance criteria (SPEC) through the real UI.
 //
 //   node e2e/flows.mjs --base http://127.0.0.1:5173 [--mobile]
-//        [--shots <dir>] [--auth session|ui] [--db server/data/metta.db]
+//        [--shots <dir>] [--auth session|ui] [--db mysql://…local dev DB, default DATABASE_URL]
 //        [--headed] [--reduced] [--from <step-id> --state <file>] [--until <step-id>]
 //
 // Needs the dev servers (npm run dev + npm run dev:api) and the dev seed
@@ -68,7 +68,7 @@ const MOBILE = argv.includes("--mobile");
 const MODE = MOBILE ? "mobile" : "desktop";
 const BASE = String(opt("base", "http://127.0.0.1:5173")).replace(/\/$/, "");
 const AUTH = opt("auth", "session");
-const DB_PATH = resolve(SITE, opt("db", "server/data/metta.db"));
+const DB_URL = opt("db", null); // default: DATABASE_URL (site/.env)
 const SHOTS = resolve(opt("shots", join(tmpdir(), "metta-e2e-shots", MODE)));
 const WORK = join(tmpdir(), `metta-e2e-${MODE}-${Date.now().toString(36)}`);
 const FROM = opt("from", null);
@@ -160,7 +160,7 @@ let shotNo = FROM ? S.shotNo || 0 : 0;
 
 const F = await makeFixtures(join(WORK, "fixtures"), { run: S.run });
 const browser = await launch({ headless: !argv.includes("--headed") });
-const devdb = AUTH === "session" ? (await import("./devdb.mjs")).openDevDb(DB_PATH) : null;
+const devdbModule = AUTH === "session" ? await import("./devdb.mjs") : null;
 const pages = {};
 const downloadsDir = join(WORK, "downloads");
 
@@ -176,7 +176,7 @@ async function pageFor(role) {
 async function signIn(page, role) {
   const email = role === "client" ? S.client.email : STAFF[role];
   if (AUTH === "session") {
-    await page.setCookie("metta_sid", devdb.mintSession(email));
+    await page.setCookie("metta_sid", await devdb.mintSession(email));
     return;
   }
   // --auth ui: the login form with the dev accounts of seed-dev.js.
@@ -290,7 +290,7 @@ step("c1-invite", 1, "Pessoa do cliente abre o convite e acessa o painel", async
     await client.click("Criar acesso", { role: "button" });
     await client.waitFor(() => location.pathname.startsWith("/painel"), { message: "o convite aceito não abriu o painel" });
   } else {
-    devdb.activateInvited(S.client.email);
+    await devdb.activateInvited(S.client.email);
     await signIn(client, "client");
   }
   S.client.active = true;
@@ -781,8 +781,8 @@ for (const s of steps) {
   if (UNTIL && s.id === UNTIL) break;
 }
 
-devdb?.revokeAll();
-devdb?.close();
+await devdb?.revokeAll();
+await devdb?.close();
 await browser.close();
 const byCriterion = {};
 for (const r of results) (byCriterion[r.criterion] ||= []).push(r.ok);

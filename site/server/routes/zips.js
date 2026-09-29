@@ -40,9 +40,9 @@ export default function zipsRoutes(ctx) {
     res.status(202).json({ job: serializeZipJob(job) });
   });
 
-  router.get("/api/zips", requireAuth, requireCap(...VIEW), (req, res) => {
+  router.get("/api/zips", requireAuth, requireCap(...VIEW), async (req, res) => {
     const since = new Date(Date.now() - RECENT_DAYS * 24 * 3600 * 1000).toISOString();
-    const rows = db.all("SELECT * FROM zip_jobs WHERE user_id = ? AND created_at > ? ORDER BY created_at DESC LIMIT 20", [
+    const rows = await db.all("SELECT * FROM zip_jobs WHERE user_id = ? AND created_at > ? ORDER BY created_at DESC LIMIT 20", [
       req.user.id,
       since,
     ]);
@@ -50,8 +50,8 @@ export default function zipsRoutes(ctx) {
     res.json({ items, total: items.length });
   });
 
-  router.get("/api/zips/:id", requireAuth, requireCap(...VIEW), (req, res) => {
-    res.json({ job: serializeZipJob(assertZipJob(req, req.params.id)) });
+  router.get("/api/zips/:id", requireAuth, requireCap(...VIEW), async (req, res) => {
+    res.json({ job: serializeZipJob(await assertZipJob(req, req.params.id)) });
   });
 
   // The /dl checks run here first: a package whose content is no longer
@@ -59,7 +59,7 @@ export default function zipsRoutes(ctx) {
   // gone answers 410 with the reason and turns 'expired', so the tray shows
   // it instead of a silent failed browser download.
   router.post("/api/zips/:id/link", requireAuth, requireCap(...VIEW), async (req, res) => {
-    const job = assertZipReady(assertZipJob(req, req.params.id));
+    const job = assertZipReady(await assertZipJob(req, req.params.id));
     const problem = await zipLinkProblem(req, job);
     if (problem) {
       await retireZipJob(ctx, job, problem);

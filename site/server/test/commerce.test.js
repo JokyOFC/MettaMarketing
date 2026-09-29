@@ -157,8 +157,8 @@ before(async () => {
   });
   ctx = server.ctx;
 
-  const clientA = createClientWithBrand(ctx, { name: "Cliente A", brandName: "Marca A" });
-  const clientB = createClientWithBrand(ctx, { name: "Cliente B", brandName: "Marca B" });
+  const clientA = await createClientWithBrand(ctx, { name: "Cliente A", brandName: "Marca A" });
+  const clientB = await createClientWithBrand(ctx, { name: "Cliente B", brandName: "Marca B" });
   Object.assign(f, { clientA: clientA.clientId, brandA: clientA.brandId, clientB: clientB.clientId, brandB: clientB.brandId });
 
   u.admin = await createUser(ctx, { role: "admin" });
@@ -167,8 +167,8 @@ before(async () => {
   u.designer = await createUser(ctx, { role: "designer" });
   u.clientA = await createUser(ctx, { role: "client", clientId: f.clientA });
   u.clientB = await createUser(ctx, { role: "client", clientId: f.clientB });
-  addStaffAccess(ctx, u.manager.id, f.clientA);
-  createProject(ctx, { brandId: f.brandA, memberIds: [u.designer.id] });
+  await addStaffAccess(ctx, u.manager.id, f.clientA);
+  await createProject(ctx, { brandId: f.brandA, memberIds: [u.designer.id] });
 
   for (const [key, user] of Object.entries(u)) a[key] = await login(server, { email: user.email });
 });
@@ -192,7 +192,7 @@ async function newOrder(agent = a.finance, body = {}) {
   return res.body.order;
 }
 
-const orderRow = (id) => ctx.db.get("SELECT * FROM orders WHERE id = ?", [id]);
+const orderRow = async (id) => await ctx.db.get("SELECT * FROM orders WHERE id = ?", [id]);
 
 // ---------------------------------------------------------------- tests
 
@@ -200,7 +200,7 @@ describe("Mercado Pago not configured", () => {
   test("checkout answers 503 and clients get a friendly message", async () => {
     const bare = await startTestServer();
     try {
-      const { clientId } = createClientWithBrand(bare.ctx, { name: "Sem MP" });
+      const { clientId } = await createClientWithBrand(bare.ctx, { name: "Sem MP" });
       const admin = await login(bare, { email: (await createUser(bare.ctx, { role: "admin" })).email });
       const client = await login(bare, { email: (await createUser(bare.ctx, { role: "client", clientId })).email });
 
@@ -215,9 +215,9 @@ describe("Mercado Pago not configured", () => {
       assert.equal(checkout.status, 503);
       assert.equal(checkout.body.error.code, "integration_not_configured");
       assert.match(checkout.body.error.message, /^Mercado Pago não configurado/);
-      assert.equal(bare.db.get("SELECT status FROM orders WHERE id = ?", [created.body.order.id]).status, "draft");
+      assert.equal((await bare.db.get("SELECT status FROM orders WHERE id = ?", [created.body.order.id])).status, "draft");
 
-      bare.db.run("UPDATE orders SET status = 'pending_payment' WHERE id = ?", [created.body.order.id]);
+      await bare.db.run("UPDATE orders SET status = 'pending_payment' WHERE id = ?", [created.body.order.id]);
       const pay = await client.post(`/api/portal/orders/${created.body.order.id}/pay`, {});
       assert.equal(pay.status, 503);
       assert.equal(pay.body.error.message, "Pagamento online indisponível no momento. Fale com a Metta.");
@@ -231,7 +231,7 @@ describe("Mercado Pago not configured", () => {
         body: JSON.stringify({ type: "payment", data: { id: "1" } }),
       });
       assert.equal(hook.status, 401);
-      const event = bare.db.get("SELECT * FROM webhook_events WHERE request_id = 'r-1'");
+      const event = await bare.db.get("SELECT * FROM webhook_events WHERE request_id = 'r-1'");
       assert.equal(event.signature_valid, 0);
       assert.match(event.error, /MP_WEBHOOK_SECRET/);
     } finally {
@@ -333,10 +333,10 @@ describe("orders and checkout", () => {
     assert.equal(res.status, 200, JSON.stringify(res.body));
     assert.equal(res.body.sent, 1);
     assert.equal(res.body.emailConfigured, false);
-    const note = ctx.db.get("SELECT * FROM notifications WHERE user_id = ? AND type = 'order.sent'", [u.clientA.id]);
+    const note = await ctx.db.get("SELECT * FROM notifications WHERE user_id = ? AND type = 'order.sent'", [u.clientA.id]);
     assert.ok(note);
     assert.equal(note.link, "/painel/financeiro");
-    const mail = ctx.db.get("SELECT * FROM email_outbox WHERE to_user_id = ? ORDER BY created_at DESC LIMIT 1", [u.clientA.id]);
+    const mail = await ctx.db.get("SELECT * FROM email_outbox WHERE to_user_id = ? ORDER BY created_at DESC LIMIT 1", [u.clientA.id]);
     assert.ok(mail);
     assert.equal(mail.status, "not_configured");
   });
@@ -350,24 +350,24 @@ describe("webhooks", () => {
     assert.equal(res.status, 200);
     assert.equal(mock.calls("GET", "/v1/payments/5001").length, fetchesBefore + 1);
 
-    const order = orderRow(f.order.id);
+    const order = await orderRow(f.order.id);
     assert.equal(order.status, "paid");
     assert.equal(order.paid_at, "2026-09-28T14:00:00.000Z");
-    const payment = ctx.db.get("SELECT * FROM payments WHERE provider_payment_id = '5001'");
+    const payment = await ctx.db.get("SELECT * FROM payments WHERE provider_payment_id = '5001'");
     assert.equal(payment.order_id, f.order.id);
     assert.equal(payment.client_id, f.clientA);
     assert.equal(payment.amount_cents, 150000);
     assert.equal(payment.method, "credit_card/visa");
 
-    const event = ctx.db.get("SELECT * FROM webhook_events WHERE request_id = ?", [res.requestId]);
+    const event = await ctx.db.get("SELECT * FROM webhook_events WHERE request_id = ?", [res.requestId]);
     assert.equal(event.signature_valid, 1);
     assert.ok(event.processed_at);
     assert.equal(event.error, null);
 
-    assert.ok(ctx.db.get("SELECT id FROM notifications WHERE user_id = ? AND type = 'payment.approved'", [u.clientA.id]));
-    assert.ok(ctx.db.get("SELECT id FROM notifications WHERE user_id = ? AND type = 'payment.approved'", [u.finance.id]));
-    assert.equal(ctx.db.get("SELECT id FROM notifications WHERE user_id = ? AND type = 'payment.approved'", [u.clientB.id]), undefined);
-    const log = ctx.db.get("SELECT * FROM activity_log WHERE action = 'payment.approved' AND entity_id = ?", [f.order.id]);
+    assert.ok(await ctx.db.get("SELECT id FROM notifications WHERE user_id = ? AND type = 'payment.approved'", [u.clientA.id]));
+    assert.ok(await ctx.db.get("SELECT id FROM notifications WHERE user_id = ? AND type = 'payment.approved'", [u.finance.id]));
+    assert.equal(await ctx.db.get("SELECT id FROM notifications WHERE user_id = ? AND type = 'payment.approved'", [u.clientB.id]), undefined);
+    const log = await ctx.db.get("SELECT * FROM activity_log WHERE action = 'payment.approved' AND entity_id = ?", [f.order.id]);
     assert.equal(log.visibility, "client");
 
     const billing = await a.clientA.get("/api/portal/billing");
@@ -384,22 +384,22 @@ describe("webhooks", () => {
     const requestId = randomUUID();
     const first = await sendWebhook(server, { dataId: "5002", requestId });
     assert.equal(first.status, 200);
-    const notes = ctx.db.get("SELECT COUNT(*) AS n FROM notifications").n;
+    const notes = (await ctx.db.get("SELECT COUNT(*) AS n FROM notifications")).n;
     const fetches = mock.calls("GET", "/v1/payments/5002").length;
-    const logs = ctx.db.get("SELECT COUNT(*) AS n FROM activity_log").n;
+    const logs = (await ctx.db.get("SELECT COUNT(*) AS n FROM activity_log")).n;
 
     const second = await sendWebhook(server, { dataId: "5002", requestId });
     assert.equal(second.status, 200);
     assert.equal(second.body.duplicate, true);
     assert.equal(mock.calls("GET", "/v1/payments/5002").length, fetches);
-    assert.equal(ctx.db.get("SELECT COUNT(*) AS n FROM notifications").n, notes);
-    assert.equal(ctx.db.get("SELECT COUNT(*) AS n FROM activity_log").n, logs);
-    assert.equal(ctx.db.get("SELECT COUNT(*) AS n FROM payments WHERE provider_payment_id = '5002'").n, 1);
-    assert.equal(ctx.db.get("SELECT COUNT(*) AS n FROM webhook_events WHERE request_id = ?", [requestId]).n, 1);
+    assert.equal((await ctx.db.get("SELECT COUNT(*) AS n FROM notifications")).n, notes);
+    assert.equal((await ctx.db.get("SELECT COUNT(*) AS n FROM activity_log")).n, logs);
+    assert.equal((await ctx.db.get("SELECT COUNT(*) AS n FROM payments WHERE provider_payment_id = '5002'")).n, 1);
+    assert.equal((await ctx.db.get("SELECT COUNT(*) AS n FROM webhook_events WHERE request_id = ?", [requestId])).n, 1);
 
     // A new delivery (new request id) for the same unchanged payment changes nothing either.
     await sendWebhook(server, { dataId: "5002" });
-    assert.equal(ctx.db.get("SELECT COUNT(*) AS n FROM notifications").n, notes);
+    assert.equal((await ctx.db.get("SELECT COUNT(*) AS n FROM notifications")).n, notes);
   });
 
   test("invalid signature answers 401, is recorded and changes nothing", async () => {
@@ -409,12 +409,12 @@ describe("webhooks", () => {
     const fetches = mock.calls("GET", "/v1/payments/5003").length;
     const res = await sendWebhook(server, { dataId: "5003", secret: "wrong-secret" });
     assert.equal(res.status, 401);
-    const event = ctx.db.get("SELECT * FROM webhook_events WHERE request_id = ?", [res.requestId]);
+    const event = await ctx.db.get("SELECT * FROM webhook_events WHERE request_id = ?", [res.requestId]);
     assert.equal(event.signature_valid, 0);
     assert.match(event.error, /Assinatura inválida/);
-    assert.equal(orderRow(order.id).status, "pending_payment");
+    assert.equal((await orderRow(order.id)).status, "pending_payment");
     assert.equal(mock.calls("GET", "/v1/payments/5003").length, fetches);
-    assert.equal(ctx.db.get("SELECT id FROM payments WHERE provider_payment_id = '5003'"), undefined);
+    assert.equal(await ctx.db.get("SELECT id FROM payments WHERE provider_payment_id = '5003'"), undefined);
 
     const malformed = await sendWebhook(server, { dataId: "5003", signature: "garbage" });
     assert.equal(malformed.status, 401);
@@ -436,10 +436,10 @@ describe("webhooks", () => {
     });
     const res = await sendWebhook(server, { dataId: "5004" });
     assert.equal(res.status, 200);
-    const row = orderRow(order.id);
+    const row = await orderRow(order.id);
     assert.equal(row.status, "failed");
     assert.equal(row.failure_reason, "Saldo ou limite insuficiente");
-    assert.ok(ctx.db.get("SELECT id FROM notifications WHERE user_id = ? AND type = 'payment.failed'", [u.clientA.id]));
+    assert.ok(await ctx.db.get("SELECT id FROM notifications WHERE user_id = ? AND type = 'payment.failed'", [u.clientA.id]));
 
     const detail = await a.finance.get(`/api/orders/${order.id}`);
     assert.equal(detail.body.order.failureReason, "Saldo ou limite insuficiente");
@@ -455,26 +455,26 @@ describe("webhooks", () => {
     // A later approved attempt settles it.
     addPayment(mock, 5005, { external_reference: order.externalReference });
     await sendWebhook(server, { dataId: "5005" });
-    assert.equal(orderRow(order.id).status, "paid");
-    assert.equal(orderRow(order.id).failure_reason, null);
+    assert.equal((await orderRow(order.id)).status, "paid");
+    assert.equal((await orderRow(order.id)).failure_reason, null);
   });
 
   test("unknown references are recorded with an error and never crash", async () => {
     addPayment(mock, 5006, { external_reference: "outra-loja-123" });
     const res = await sendWebhook(server, { dataId: "5006" });
     assert.equal(res.status, 200);
-    const event = ctx.db.get("SELECT * FROM webhook_events WHERE request_id = ?", [res.requestId]);
+    const event = await ctx.db.get("SELECT * FROM webhook_events WHERE request_id = ?", [res.requestId]);
     assert.ok(event.processed_at);
     assert.match(event.error, /Referência desconhecida/);
-    assert.equal(ctx.db.get("SELECT id FROM payments WHERE provider_payment_id = '5006'"), undefined);
+    assert.equal(await ctx.db.get("SELECT id FROM payments WHERE provider_payment_id = '5006'"), undefined);
 
     const missing = await sendWebhook(server, { dataId: "999999" });
     assert.equal(missing.status, 200);
-    assert.match(ctx.db.get("SELECT error FROM webhook_events WHERE request_id = ?", [missing.requestId]).error, /recusou/);
+    assert.match((await ctx.db.get("SELECT error FROM webhook_events WHERE request_id = ?", [missing.requestId])).error, /recusou/);
 
     const other = await sendWebhook(server, { type: "merchant_order", dataId: "77" });
     assert.equal(other.status, 200);
-    assert.equal(ctx.db.get("SELECT error FROM webhook_events WHERE request_id = ?", [other.requestId]).error, null);
+    assert.equal((await ctx.db.get("SELECT error FROM webhook_events WHERE request_id = ?", [other.requestId])).error, null);
 
     const broken = await fetch(`${server.url}/api/webhooks/mercadopago`, {
       method: "POST",
@@ -482,7 +482,7 @@ describe("webhooks", () => {
       body: "{not json",
     });
     assert.equal(broken.status, 400);
-    assert.ok(ctx.db.get("SELECT id FROM webhook_events WHERE request_id = 'broken-1'"));
+    assert.ok(await ctx.db.get("SELECT id FROM webhook_events WHERE request_id = 'broken-1'"));
   });
 
   test("unsigned deliveries store no payload, are limited per IP and pruned", async () => {
@@ -500,10 +500,10 @@ describe("webhooks", () => {
       }
       assert.ok(statuses.slice(0, UNSIGNED_LIMIT.max).every((code) => code === 401));
       assert.ok(statuses.slice(UNSIGNED_LIMIT.max).every((code) => code === 429), "beyond the limit nothing is stored");
-      const stored = fresh.db.get("SELECT COUNT(*) AS n, SUM(LENGTH(IFNULL(payload, ''))) AS bytes FROM webhook_events");
+      const stored = await fresh.db.get("SELECT COUNT(*) AS n, SUM(LENGTH(IFNULL(payload, ''))) AS bytes FROM webhook_events");
       assert.equal(stored.n, UNSIGNED_LIMIT.max);
       assert.equal(stored.bytes, 0, "no payload from unsigned requests");
-      const row = fresh.db.get("SELECT * FROM webhook_events WHERE request_id = 'spam-0'");
+      const row = await fresh.db.get("SELECT * FROM webhook_events WHERE request_id = 'spam-0'");
       assert.equal(row.signature_valid, 0);
       assert.match(row.error, /Assinatura inválida/);
 
@@ -511,36 +511,36 @@ describe("webhooks", () => {
       addPayment(mock, 5101, { external_reference: "sem-pedido-5101" });
       const signed = await sendWebhook(fresh, { dataId: "5101" });
       assert.equal(signed.status, 200);
-      assert.ok(fresh.db.get("SELECT payload FROM webhook_events WHERE request_id = ?", [signed.requestId]).payload.includes("5101"));
+      assert.ok((await fresh.db.get("SELECT payload FROM webhook_events WHERE request_id = ?", [signed.requestId])).payload.includes("5101"));
 
       // a signed delivery reusing an id first seen unsigned replaces the stored metadata
       const reused = await sendWebhook(fresh, { dataId: "5101", requestId: "spam-1" });
       assert.equal(reused.status, 200);
-      const upgraded = fresh.db.get("SELECT * FROM webhook_events WHERE request_id = 'spam-1'");
+      const upgraded = await fresh.db.get("SELECT * FROM webhook_events WHERE request_id = 'spam-1'");
       assert.equal(upgraded.signature_valid, 1);
       assert.ok(upgraded.payload.includes("5101"));
 
       // retention: old rejected rows go, the newest ones are capped, pending signed rows stay
-      const insert = (id, valid, receivedAt, processed) =>
-        fresh.db.run(
+      const insert = async (id, valid, receivedAt, processed) =>
+        await fresh.db.run(
           "INSERT INTO webhook_events (id, provider, request_id, signature_valid, received_at, processed_at) VALUES (?, 'mercadopago', ?, ?, ?, ?)",
           [id, id, valid, receivedAt, processed],
         );
       const old = new Date(Date.now() - (WEBHOOK_RETENTION.unsignedDays + 1) * 86400000).toISOString();
       const veryOld = new Date(Date.now() - (WEBHOOK_RETENTION.signedDays + 1) * 86400000).toISOString();
-      fresh.db.tx(() => {
-        insert("whk_oldUnsigned0001", 0, old, null);
-        insert("whk_oldSignedDone01", 1, veryOld, veryOld);
-        insert("whk_oldSignedOpen01", 1, veryOld, null);
+      await fresh.db.tx(async () => {
+        await insert("whk_oldUnsigned0001", 0, old, null);
+        await insert("whk_oldSignedDone01", 1, veryOld, veryOld);
+        await insert("whk_oldSignedOpen01", 1, veryOld, null);
         for (let i = 0; i < WEBHOOK_RETENTION.unsignedKeep + 20; i += 1)
-          insert(`whk_flood${String(i).padStart(10, "0")}`, 0, new Date(Date.now() - i * 1000).toISOString(), null);
+          await insert(`whk_flood${String(i).padStart(10, "0")}`, 0, new Date(Date.now() - i * 1000).toISOString(), null);
       });
-      pruneWebhookEvents(fresh.db);
-      assert.equal(fresh.db.get("SELECT COUNT(*) AS n FROM webhook_events WHERE signature_valid = 0").n, WEBHOOK_RETENTION.unsignedKeep);
-      assert.equal(fresh.db.get("SELECT id FROM webhook_events WHERE id = 'whk_oldUnsigned0001'"), undefined);
-      assert.equal(fresh.db.get("SELECT id FROM webhook_events WHERE id = 'whk_oldSignedDone01'"), undefined);
-      assert.ok(fresh.db.get("SELECT id FROM webhook_events WHERE id = 'whk_oldSignedOpen01'"), "unprocessed signed rows are kept");
-      assert.ok(fresh.db.get("SELECT id FROM webhook_events WHERE request_id = ?", [signed.requestId]));
+      await pruneWebhookEvents(fresh.db);
+      assert.equal((await fresh.db.get("SELECT COUNT(*) AS n FROM webhook_events WHERE signature_valid = 0")).n, WEBHOOK_RETENTION.unsignedKeep);
+      assert.equal(await fresh.db.get("SELECT id FROM webhook_events WHERE id = 'whk_oldUnsigned0001'"), undefined);
+      assert.equal(await fresh.db.get("SELECT id FROM webhook_events WHERE id = 'whk_oldSignedDone01'"), undefined);
+      assert.ok(await fresh.db.get("SELECT id FROM webhook_events WHERE id = 'whk_oldSignedOpen01'"), "unprocessed signed rows are kept");
+      assert.ok(await fresh.db.get("SELECT id FROM webhook_events WHERE request_id = ?", [signed.requestId]));
       await webhookIdle(fresh.ctx);
     } finally {
       await fresh.close();
@@ -583,16 +583,16 @@ describe("upstream failures", () => {
 
       mock.state.mode = "down";
       await a.finance.patch(`/api/orders/${order.id}`, {}); // no-op
-      ctx.db.run("UPDATE orders SET status = 'pending_payment' WHERE id = ?", [order.id]);
+      await ctx.db.run("UPDATE orders SET status = 'pending_payment' WHERE id = ?", [order.id]);
       const pay = await a.clientA.post(`/api/portal/orders/${order.id}/pay`, {});
       assert.equal(pay.status, 502);
       assert.match(pay.body.error.message, /Tente de novo/);
-      ctx.db.run("UPDATE orders SET status = 'draft' WHERE id = ?", [order.id]);
+      await ctx.db.run("UPDATE orders SET status = 'draft' WHERE id = ?", [order.id]);
     } finally {
       mock.state.mode = "ok";
       delete ctx.config.mpTimeoutMs;
     }
-    const row = orderRow(order.id);
+    const row = await orderRow(order.id);
     assert.equal(row.status, "draft");
     assert.equal(row.checkout_url, null);
   });
@@ -631,11 +631,11 @@ describe("subscriptions", () => {
     Object.assign(mock.state.preapprovals.get(preapprovalId), { status: "authorized", next_payment_date: "2026-10-28T10:00:00.000-04:00" });
     const hook = await sendWebhook(server, { type: "subscription_preapproval", dataId: preapprovalId });
     assert.equal(hook.status, 200);
-    const active = ctx.db.get("SELECT * FROM subscriptions WHERE id = ?", [sub.id]);
+    const active = await ctx.db.get("SELECT * FROM subscriptions WHERE id = ?", [sub.id]);
     assert.equal(active.status, "active");
     assert.equal(active.next_billing_date, "2026-10-28");
     assert.ok(active.started_at);
-    assert.ok(ctx.db.get("SELECT id FROM notifications WHERE user_id = ? AND type = 'subscription.active'", [u.clientA.id]));
+    assert.ok(await ctx.db.get("SELECT id FROM notifications WHERE user_id = ? AND type = 'subscription.active'", [u.clientA.id]));
 
     const summary = await a.finance.get("/api/finance/summary");
     assert.equal(summary.body.subscriptions.active, 1);
@@ -664,11 +664,11 @@ describe("subscriptions", () => {
     mock.state.authorized.set("7001", { id: 7001, preapproval_id: preapprovalId, payment: { id: 6001 } });
     const res = await sendWebhook(server, { type: "subscription_authorized_payment", dataId: "7001" });
     assert.equal(res.status, 200);
-    assert.equal(ctx.db.get("SELECT error FROM webhook_events WHERE request_id = ?", [res.requestId]).error, null);
-    const payment = ctx.db.get("SELECT * FROM payments WHERE provider_payment_id = '6001'");
+    assert.equal((await ctx.db.get("SELECT error FROM webhook_events WHERE request_id = ?", [res.requestId])).error, null);
+    const payment = await ctx.db.get("SELECT * FROM payments WHERE provider_payment_id = '6001'");
     assert.equal(payment.subscription_id, sub.id);
     assert.equal(payment.client_id, f.clientA);
-    assert.match(ctx.db.get("SELECT failure_reason FROM subscriptions WHERE id = ?", [sub.id]).failure_reason, /Cartão desativado/);
+    assert.match((await ctx.db.get("SELECT failure_reason FROM subscriptions WHERE id = ?", [sub.id])).failure_reason, /Cartão desativado/);
     const billing = await a.clientA.get("/api/portal/billing");
     assert.ok(billing.body.payments.some((p) => p.subscription?.id === sub.id && p.reason?.startsWith("Cartão desativado")));
     await a.finance.post(`/api/subscriptions/${sub.id}/cancel`, {});
@@ -686,7 +686,7 @@ describe("subscriptions", () => {
     } finally {
       mock.state.mode = "ok";
     }
-    assert.equal(ctx.db.get("SELECT status FROM subscriptions WHERE id = ?", [sub.id]).status, "pending");
+    assert.equal((await ctx.db.get("SELECT status FROM subscriptions WHERE id = ?", [sub.id])).status, "pending");
   });
 });
 
@@ -753,13 +753,13 @@ describe("isolation and permissions", () => {
     const res = await a.finance.get("/api/finance/summary");
     assert.equal(res.status, 200);
     const db = ctx.db;
-    const open = db.get("SELECT COUNT(*) AS n, SUM(amount_cents) AS cents FROM orders WHERE status IN ('pending_payment', 'failed')");
+    const open = await db.get("SELECT COUNT(*) AS n, SUM(amount_cents) AS cents FROM orders WHERE status IN ('pending_payment', 'failed')");
     assert.equal(res.body.receivable.count, open.n);
     assert.equal(res.body.receivable.cents, open.cents ?? 0);
-    assert.equal(res.body.failures.recent, db.get("SELECT COUNT(*) AS n FROM payments WHERE status IN ('rejected', 'charged_back')").n);
+    assert.equal(res.body.failures.recent, (await db.get("SELECT COUNT(*) AS n FROM payments WHERE status IN ('rejected', 'charged_back')")).n);
     // Every approved test payment is dated 2026-09-28 (Brasília); only count it in that month.
     const month = res.body.month;
-    const approved = db.get("SELECT COUNT(*) AS n, SUM(amount_cents) AS cents FROM payments WHERE status = 'approved'");
+    const approved = await db.get("SELECT COUNT(*) AS n, SUM(amount_cents) AS cents FROM payments WHERE status = 'approved'");
     if (month === "2026-09") {
       assert.equal(res.body.receivedThisMonth.count, approved.n);
       assert.equal(res.body.receivedThisMonth.cents, approved.cents);
@@ -777,13 +777,13 @@ describe("isolation and permissions", () => {
   test("cancelling an order expires its link and tells the client", async () => {
     const order = await newOrder(a.finance, { description: "Pedido a cancelar" });
     await a.finance.post(`/api/orders/${order.id}/checkout`, {});
-    const prefId = orderRow(order.id).mp_preference_id;
+    const prefId = (await orderRow(order.id)).mp_preference_id;
     const res = await a.finance.post(`/api/orders/${order.id}/cancel`, {});
     assert.equal(res.status, 200);
     assert.equal(res.body.order.status, "cancelled");
     assert.equal(res.body.warning, null);
     assert.equal(mock.calls("PUT", `/checkout/preferences/${prefId}`).at(-1).body.expires, true);
-    assert.ok(ctx.db.get("SELECT id FROM notifications WHERE user_id = ? AND type = 'order.cancelled'", [u.clientA.id]));
+    assert.ok(await ctx.db.get("SELECT id FROM notifications WHERE user_id = ? AND type = 'order.cancelled'", [u.clientA.id]));
     assert.equal((await a.clientA.post(`/api/portal/orders/${order.id}/pay`, {})).status, 409);
     assert.equal((await a.finance.post(`/api/orders/${order.id}/cancel`, {})).status, 409);
   });

@@ -12,7 +12,7 @@ import { now } from "./time.js";
  * the surrounding transaction commits). link is an app path such as
  * /painel/conteudo/mat_x.
  */
-export function notify(source, userIds, payload) {
+export async function notify(source, userIds, payload) {
   if (Array.isArray(source) || !payload) throw new Error("usage: notify(req | ctx, userIds, payload)");
   const ctx = source?.ctx ?? source;
   const { db } = ctx;
@@ -22,7 +22,7 @@ export function notify(source, userIds, payload) {
   );
   if (!ids.length) return [];
 
-  const users = db.all(
+  const users = await db.all(
     `SELECT id, email, name, status, notify_email FROM users
       WHERE id IN (${ids.map(() => "?").join(", ")}) AND status IN ('active', 'invited')`,
     ids,
@@ -31,7 +31,7 @@ export function notify(source, userIds, payload) {
   const created = [];
   for (const user of users) {
     const id = newId("ntf");
-    db.run(
+    await db.run(
       `INSERT INTO notifications (id, user_id, type, title, body, link, entity_type, entity_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -60,9 +60,8 @@ export function notify(source, userIds, payload) {
         actionLabel: payload.actionLabel ?? "Abrir na plataforma",
         actionUrl,
       });
-      db.afterCommit(() => {
-        ctx.mailer.send({ to: user.email, toUserId: user.id, ...message }).catch(() => {});
-      });
+      // recorded with the notification; delivered after the commit
+      await ctx.mailer.enqueue({ to: user.email, toUserId: user.id, ...message });
     }
   }
   return created;
@@ -71,61 +70,61 @@ export function notify(source, userIds, payload) {
 // ------------------------------------------------------------- recipients
 
 // Active users of a client account.
-export function clientUserIds(db, clientId) {
+export async function clientUserIds(db, clientId) {
   if (!clientId) return [];
-  return db
-    .all("SELECT id FROM users WHERE role = 'client' AND client_id = ? AND status = 'active'", [clientId])
+  return (await db
+    .all("SELECT id FROM users WHERE role = 'client' AND client_id = ? AND status = 'active'", [clientId]))
     .map((row) => row.id);
 }
 
 // Managers with access to the client.
-export function managerIdsForClient(db, clientId) {
+export async function managerIdsForClient(db, clientId) {
   if (!clientId) return [];
-  return db
+  return (await db
     .all(
       `SELECT u.id FROM users u JOIN staff_client_access a ON a.user_id = u.id
         WHERE a.client_id = ? AND u.role = 'manager' AND u.status = 'active'`,
       [clientId],
-    )
+    ))
     .map((row) => row.id);
 }
 
-export function adminIds(db) {
-  return db.all("SELECT id FROM users WHERE role = 'admin' AND status = 'active'").map((row) => row.id);
+export async function adminIds(db) {
+  return (await db.all("SELECT id FROM users WHERE role = 'admin' AND status = 'active'")).map((row) => row.id);
 }
 
 // Staff responsible for a material: owner, creator, project members and the
 // managers of its client.
-export function staffIdsForMaterial(db, material) {
+export async function staffIdsForMaterial(db, material) {
   if (!material) return [];
   const clientId =
-    material.client_id ?? db.get("SELECT client_id FROM brands WHERE id = ?", [material.brand_id])?.client_id;
+    material.client_id ?? (await db.get("SELECT client_id FROM brands WHERE id = ?", [material.brand_id]))?.client_id;
   const ids = new Set();
-  const staff = (id) => {
+  const staff = async (id) => {
     if (!id) return;
-    const row = db.get("SELECT role, status FROM users WHERE id = ?", [id]);
+    const row = await db.get("SELECT role, status FROM users WHERE id = ?", [id]);
     if (row && row.role !== "client" && row.status === "active") ids.add(id);
   };
-  staff(material.owner_id);
-  staff(material.created_by);
+  await staff(material.owner_id);
+  await staff(material.created_by);
   if (material.project_id) {
-    for (const row of db.all(
+    for (const row of await db.all(
       `SELECT pm.user_id FROM project_members pm JOIN users u ON u.id = pm.user_id
         WHERE pm.project_id = ? AND u.status = 'active'`,
       [material.project_id],
     ))
       ids.add(row.user_id);
   }
-  for (const id of managerIdsForClient(db, clientId)) ids.add(id);
+  for (const id of await managerIdsForClient(db, clientId)) ids.add(id);
   return [...ids];
 }
 
 // Managers of the brand's client plus members of the brand's projects.
-export function staffForBrand(db, brandId) {
-  const brand = db.get("SELECT client_id FROM brands WHERE id = ?", [brandId]);
+export async function staffForBrand(db, brandId) {
+  const brand = await db.get("SELECT client_id FROM brands WHERE id = ?", [brandId]);
   if (!brand) return [];
-  const ids = new Set(managerIdsForClient(db, brand.client_id));
-  for (const row of db.all(
+  const ids = new Set(await managerIdsForClient(db, brand.client_id));
+  for (const row of await db.all(
     `SELECT DISTINCT pm.user_id FROM project_members pm
        JOIN projects p ON p.id = pm.project_id JOIN users u ON u.id = pm.user_id
       WHERE p.brand_id = ? AND u.status = 'active'`,

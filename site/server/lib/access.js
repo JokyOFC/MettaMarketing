@@ -37,7 +37,7 @@ function viewer(source) {
  * null sets mean "not restricted at this level" (e.g. a manager sees every
  * project of the clients in clientIds). Cached per request.
  */
-export function getScope(req) {
+export async function getScope(req) {
   const user = requireUser(req);
   const cached = scopes.get(req);
   if (cached && cached.userId === user.id) return cached;
@@ -50,7 +50,7 @@ export function getScope(req) {
       scope = { all: true, clientIds: null, projectIds: null, brandIds: null, materials: false, projects: false };
       break;
     case "manager": {
-      const rows = db(req).all("SELECT client_id FROM staff_client_access WHERE user_id = ?", [user.id]);
+      const rows = await db(req).all("SELECT client_id FROM staff_client_access WHERE user_id = ?", [user.id]);
       scope = {
         all: false,
         clientIds: new Set(rows.map((row) => row.client_id)),
@@ -62,7 +62,7 @@ export function getScope(req) {
       break;
     }
     case "designer": {
-      const rows = db(req).all(
+      const rows = await db(req).all(
         `SELECT p.id AS project_id, p.brand_id, b.client_id
            FROM project_members pm
            JOIN projects p ON p.id = pm.project_id
@@ -113,17 +113,17 @@ function isMember(scope, projectId) {
 
 // ------------------------------------------------------------------ records
 
-export function assertClient(req, id) {
-  const scope = getScope(req);
-  const row = id ? db(req).get("SELECT * FROM clients WHERE id = ?", [id]) : null;
+export async function assertClient(req, id) {
+  const scope = await getScope(req);
+  const row = id ? await db(req).get("SELECT * FROM clients WHERE id = ?", [id]) : null;
   if (!row || !hasClient(scope, row.id)) throw notFound();
   return row;
 }
 
-export function assertBrand(req, id) {
-  const scope = getScope(req);
+export async function assertBrand(req, id) {
+  const scope = await getScope(req);
   const row = id
-    ? db(req).get(
+    ? await db(req).get(
         `SELECT b.*, c.name AS client_name
            FROM brands b JOIN clients c ON c.id = b.client_id
           WHERE b.id = ?`,
@@ -136,11 +136,11 @@ export function assertBrand(req, id) {
 }
 
 // Returns the project row plus client_id (from its brand).
-export function assertProject(req, id) {
-  const scope = getScope(req);
+export async function assertProject(req, id) {
+  const scope = await getScope(req);
   if (!scope.projects) throw notFound();
   const row = id
-    ? db(req).get(
+    ? await db(req).get(
         `SELECT p.*, b.client_id AS client_id
            FROM projects p JOIN brands b ON b.id = p.brand_id
           WHERE p.id = ?`,
@@ -185,9 +185,9 @@ function canReadMaterial(req, scope, row) {
 }
 
 // Scope-level write check (capabilities are checked by the route).
-export function canWriteMaterial(req, row) {
+export async function canWriteMaterial(req, row) {
   if (!row || !req?.user) return false;
-  const scope = getScope(req);
+  const scope = await getScope(req);
   const user = req.user;
   if (!scope.materials || user.role === "client" || user.role === "finance") return false;
   if (scope.all) return true;
@@ -199,21 +199,21 @@ export function canWriteMaterial(req, row) {
 
 // Returns the material row plus client_id. { write: true } -> 403 when the
 // viewer can see it but cannot change it.
-export function assertMaterial(req, id, { write = false } = {}) {
-  const scope = getScope(req);
-  const row = id ? db(req).get(MATERIAL_SQL, [id]) : null;
+export async function assertMaterial(req, id, { write = false } = {}) {
+  const scope = await getScope(req);
+  const row = id ? await db(req).get(MATERIAL_SQL, [id]) : null;
   if (!row || !canReadMaterial(req, scope, row)) throw notFound();
-  if (write && !canWriteMaterial(req, row)) throw forbidden();
+  if (write && !await canWriteMaterial(req, row)) throw forbidden();
   return row;
 }
 
 // Returns the version row; its material row is on the non-enumerable
 // `version.material` property (never serialised by accident).
-export function assertVersion(req, id, { write = false } = {}) {
+export async function assertVersion(req, id, { write = false } = {}) {
   requireUser(req);
-  const version = id ? db(req).get("SELECT * FROM material_versions WHERE id = ?", [id]) : null;
+  const version = id ? await db(req).get("SELECT * FROM material_versions WHERE id = ?", [id]) : null;
   if (!version) throw notFound();
-  const material = assertMaterial(req, version.material_id, { write });
+  const material = await assertMaterial(req, version.material_id, { write });
   if (req.user.role === "client" && !version.released_at) throw notFound();
   Object.defineProperty(version, "material", { value: material, enumerable: false });
   return version;
@@ -250,11 +250,11 @@ const DOWNLOAD_MESSAGES = {
 // Returns the file row with non-enumerable `file.version` and `file.material`.
 // { download: true } additionally applies the download rule (403 with code
 // download_disabled or font_license).
-export function assertFile(req, id, { download = false, write = false } = {}) {
+export async function assertFile(req, id, { download = false, write = false } = {}) {
   requireUser(req);
-  const file = id ? db(req).get("SELECT * FROM material_files WHERE id = ?", [id]) : null;
+  const file = id ? await db(req).get("SELECT * FROM material_files WHERE id = ?", [id]) : null;
   if (!file) throw notFound();
-  const version = assertVersion(req, file.version_id, { write });
+  const version = await assertVersion(req, file.version_id, { write });
   const material = version.material;
   if (req.user.role === "client" && !clientCanSeeFile(file, material)) throw notFound();
   if (download) {

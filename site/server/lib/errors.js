@@ -71,6 +71,8 @@ export function errorHandler(ctx) {
       for (const issue of err.issues) fields[issue.path.join(".") || "_"] ??= issue.message;
       return sendError(res, 422, "validation", "Revise os campos destacados.", fields);
     }
+    // A unique key lost a race between two requests (MySQL).
+    if (err?.code === "ER_DUP_ENTRY") return sendError(res, 409, "conflict", "Este item mudou enquanto você trabalhava. Atualize a página.");
     const log = ctx?.log ?? console;
     log.error(`[${req.method} ${redactUrl(req.originalUrl)}]`, err);
     sendError(res, 500, "internal", INTERNAL_MESSAGE);

@@ -23,19 +23,19 @@ export default function releasesRoutes(ctx) {
   const router = Router();
   const { db } = ctx;
 
-  router.post("/api/releases/preview", requireAuth, requireCap("materials.release"), (req, res) => {
+  router.post("/api/releases/preview", requireAuth, requireCap("materials.release"), async (req, res) => {
     const body = parse(previewSchema, req.body);
-    res.json(previewRelease(req, body));
+    res.json(await previewRelease(req, body));
   });
 
-  router.post("/api/releases", requireAuth, requireCap("materials.release"), (req, res) => {
+  router.post("/api/releases", requireAuth, requireCap("materials.release"), async (req, res) => {
     const body = parse(releaseSchema, req.body);
-    res.status(201).json(releaseMaterials(req, body));
+    res.status(201).json(await releaseMaterials(req, body));
   });
 
   // Release history. Staff: within scope; clients: their own releases, with
   // only the materials they can currently see (and nothing internal).
-  router.get("/api/releases", requireAuth, requireCap("materials.view", "portal.access"), (req, res) => {
+  router.get("/api/releases", requireAuth, requireCap("materials.view", "portal.access"), async (req, res) => {
     const staff = isStaff(req);
     const scope = scopeSql.brands(req, "b");
     const where = [scope.sql];
@@ -59,8 +59,8 @@ export default function releasesRoutes(ctx) {
     const whereSql = `WHERE ${where.join(" AND ")}`;
     const from = `FROM releases r JOIN brands b ON b.id = r.brand_id JOIN clients c ON c.id = r.client_id
       LEFT JOIN users u ON u.id = r.actor_id LEFT JOIN kits k ON k.id = r.kit_id`;
-    const total = db.get(`SELECT COUNT(*) AS n ${from} ${whereSql}`, params).n;
-    const rows = db.all(
+    const total = (await db.get(`SELECT COUNT(*) AS n ${from} ${whereSql}`, params)).n;
+    const rows = await db.all(
       `SELECT r.*, b.name AS brand_name, c.name AS client_name, u.name AS actor_name, u.role AS actor_role,
           k.name AS kit_name, k.status AS kit_status
          ${from} ${whereSql} ORDER BY r.created_at DESC, r.id DESC LIMIT ? OFFSET ?`,
@@ -69,21 +69,21 @@ export default function releasesRoutes(ctx) {
 
     const releaseIds = rows.map((r) => r.id);
     const itemRows = releaseIds.length
-      ? db.all(
+      ? await db.all(
           `SELECT ri.*, v.number AS version_number FROM release_items ri
              LEFT JOIN material_versions v ON v.id = ri.version_id
             WHERE ri.release_id IN (${releaseIds.map(() => "?").join(", ")})`,
           releaseIds,
         )
       : [];
-    const materialRows = loadMaterialRows(db, [...new Set(itemRows.map((i) => i.material_id))]);
+    const materialRows = await loadMaterialRows(db, [...new Set(itemRows.map((i) => i.material_id))]);
     // clients only see materials still visible to them (scopeSql rule)
     const visible = staff
       ? materialRows
       : materialRows.filter(
           (m) => m.client_id === req.user.client_id && m.visibility === "released" && !m.archived_at && m.released_version_id,
         );
-    const materials = new Map(serializeMaterials(req, visible).map((m) => [m.id, m]));
+    const materials = new Map((await serializeMaterials(req, visible)).map((m) => [m.id, m]));
 
     const items = rows
       .map((r) => {

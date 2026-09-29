@@ -60,8 +60,8 @@ describe("contracts (AssinaVelox)", () => {
       assinavelox: { apiUrl: av.apiUrl, token: "avk_test_token", webhookSecret: WEBHOOK_SECRET, syncMinutes: 0 },
     });
     const { ctx } = server;
-    a = createClientWithBrand(ctx, { name: "Cliente Contratos A", brandName: "Marca A" });
-    b = createClientWithBrand(ctx, { name: "Cliente Contratos B", brandName: "Marca B" });
+    a = await createClientWithBrand(ctx, { name: "Cliente Contratos A", brandName: "Marca A" });
+    b = await createClientWithBrand(ctx, { name: "Cliente Contratos B", brandName: "Marca B" });
     const adminUser = await createUser(ctx, { role: "admin", email: "admin-ct@metta.test", name: "Admin Contratos" });
     await createUser(ctx, { role: "finance", email: "fin-ct@metta.test", name: "Financeiro Contratos" });
     await createUser(ctx, { role: "manager", email: "ger-ct@metta.test", name: "Gestor Contratos" });
@@ -170,7 +170,7 @@ describe("contracts (AssinaVelox)", () => {
 
   test("payment waits for the signature; the client sees why", async () => {
     // make the order payable (checkout needs Mercado Pago, so set the status directly)
-    server.db.run("UPDATE orders SET status = 'pending_payment' WHERE id = ?", [orderId]);
+    await server.db.run("UPDATE orders SET status = 'pending_payment' WHERE id = ?", [orderId]);
     const billing = (await clientA.get("/api/portal/billing")).body;
     const order = billing.orders.find((o) => o.id === orderId);
     assert.equal(order.canPay, false);
@@ -236,19 +236,19 @@ describe("contracts (AssinaVelox)", () => {
     const waiting = (await clientA.get("/api/portal/billing")).body.orders.find((o) => o.id === orderId);
     assert.equal(waiting.canPay, false);
     assert.match(waiting.payBlockedReason, /Seu aceite foi registrado/);
-    const events =server.db.get("SELECT COUNT(*) AS n FROM activity_log WHERE action = 'contract.client_signed' AND entity_id = ?", [contractId]).n;
+    const events =(await server.db.get("SELECT COUNT(*) AS n FROM activity_log WHERE action = 'contract.client_signed' AND entity_id = ?", [contractId])).n;
     assert.equal(events, 1);
 
     const again = await fetch(`${server.url}/api/webhooks/assinavelox`, { method: "POST", headers, body });
     assert.equal(again.status, 204);
     await server.ctx.jobs.idle();
     assert.equal(
-      server.db.get("SELECT COUNT(*) AS n FROM activity_log WHERE action = 'contract.client_signed' AND entity_id = ?", [contractId]).n,
+      (await server.db.get("SELECT COUNT(*) AS n FROM activity_log WHERE action = 'contract.client_signed' AND entity_id = ?", [contractId])).n,
       1,
     );
-    const unsigned = server.db.get("SELECT COUNT(*) AS n FROM webhook_events WHERE provider = 'assinavelox' AND signature_valid = 0").n;
+    const unsigned = (await server.db.get("SELECT COUNT(*) AS n FROM webhook_events WHERE provider = 'assinavelox' AND signature_valid = 0")).n;
     assert.equal(unsigned, 2);
-    const stored = server.db.get("SELECT payload FROM webhook_events WHERE provider = 'assinavelox' AND signature_valid = 0 LIMIT 1");
+    const stored = await server.db.get("SELECT payload FROM webhook_events WHERE provider = 'assinavelox' AND signature_valid = 0 LIMIT 1");
     assert.equal(stored.payload, null, "unsigned deliveries never store the payload");
 
     // The Metta signer (admin) can now open the embedded session.
@@ -396,7 +396,7 @@ describe("contracts with a public address: REST Hook subscription", () => {
       assert.equal(res.status, 200, JSON.stringify(res.body));
       assert.equal(res.body.integration.webhook.receiving, true);
       assert.equal(res.body.integration.webhook.subscription.targetUrl, "https://app.metta.example/api/webhooks/assinavelox");
-      const stored = server.db.get("SELECT value FROM settings WHERE key = 'assinavelox.webhook'").value;
+      const stored = (await server.db.get("SELECT value FROM settings WHERE name = 'assinavelox.webhook'")).value;
       const secret = [...av.state.subscriptions.values()][0].secret;
       assert.ok(!stored.includes(secret), "the secret is not stored in clear text");
 
@@ -420,14 +420,14 @@ describe("contracts without AssinaVelox configured", () => {
     const server = await startTestServer();
     try {
       const { ctx } = server;
-      const c = createClientWithBrand(ctx, { name: "Cliente Sem Contrato", brandName: "Marca" });
+      const c = await createClientWithBrand(ctx, { name: "Cliente Sem Contrato", brandName: "Marca" });
       const adminUser = await createUser(ctx, { role: "admin", email: "admin-nc@metta.test", name: "Admin" });
       const client = await createUser(ctx, { role: "client", clientId: c.client.id, email: "cli-nc@test.test", name: "Cliente" });
       const admin = await login(server, { email: adminUser.email });
       const clientSession = await login(server, { email: client.email });
       const services = (await admin.get("/api/services")).body.items;
       const order = await admin.post("/api/orders", { clientId: c.client.id, serviceId: services.find((s) => s.kind === "one_off").id });
-      server.db.run("UPDATE orders SET status = 'pending_payment' WHERE id = ?", [order.body.order.id]);
+      await server.db.run("UPDATE orders SET status = 'pending_payment' WHERE id = ?", [order.body.order.id]);
       const res = await admin.post("/api/contracts", { orderId: order.body.order.id, signer: { userId: client.id } });
       assert.equal(res.status, 503);
       assert.match(res.body.error.message, /AssinaVelox não configurada/);

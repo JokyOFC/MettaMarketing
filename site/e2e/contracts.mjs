@@ -2,7 +2,7 @@
 // End-to-end proof of the contract flow with AssinaVelox, through the real UI:
 //
 //   node e2e/contracts.mjs --base http://127.0.0.1:5173 --av-log <AssinaVelox laravel.log>
-//        [--mobile] [--shots <dir>] [--db server/data/metta.db] [--widget-origin http://127.0.0.1:8000]
+//        [--mobile] [--shots <dir>] [--db mysql://…local dev DB, default DATABASE_URL] [--widget-origin http://127.0.0.1:8000]
 //
 // Needs the dev servers (npm run dev + npm run dev:api), the dev seed
 // (npm run seed:dev) and an AssinaVelox instance the API points at
@@ -29,9 +29,8 @@ import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, re
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DatabaseSync } from "node:sqlite";
 import { HELPERS, launch, sleep } from "./driver.mjs";
-import { openDevDb } from "./devdb.mjs";
+import { devDatabaseUrl, openDevDb } from "./devdb.mjs";
 
 const argv = process.argv.slice(2);
 const opt = (name, def) => {
@@ -43,7 +42,7 @@ const SITE = resolve(HERE, "..");
 const MOBILE = argv.includes("--mobile");
 const MODE = MOBILE ? "mobile" : "desktop";
 const BASE = String(opt("base", "http://127.0.0.1:5173")).replace(/\/$/, "");
-const DB_PATH = resolve(SITE, opt("db", "server/data/metta.db"));
+const DB_URL = devDatabaseUrl(opt("db", null));
 const AV_LOG = opt("av-log", null);
 const WIDGET_ORIGIN = String(opt("widget-origin", "http://127.0.0.1:8000")).replace(/\/$/, "");
 const SHOTS = resolve(opt("shots", join(tmpdir(), "metta-e2e-contracts", MODE)));
@@ -66,8 +65,8 @@ const browser = await launch({
   extraArgs: ["--disable-site-isolation-trials"],
   disableFeatures: ["IsolateOrigins", "site-per-process"],
 });
-const devdb = openDevDb(DB_PATH);
-const sessions = { admin: devdb.mintSession(ADMIN), client: devdb.mintSession(CLIENT) };
+const devdb = await openDevDb(DB_URL);
+const sessions = { admin: await devdb.mintSession(ADMIN), client: await devdb.mintSession(CLIENT) };
 const pages = {};
 let shotNo = 0;
 
@@ -295,10 +294,7 @@ step("setup", "Contratos configurados e pedido de identidade visual para a Auror
   const order = (await api("POST", "/api/orders", { clientId: aurora.id, brandId: aurora.brands[0]?.id, serviceId: identity.id, dueDate: "2026-10-30" })).order;
   // Without Mercado Pago credentials here, the charge is opened directly in the
   // dev DB so the client sees it waiting for payment.
-  const db = new DatabaseSync(DB_PATH);
-  db.exec("PRAGMA busy_timeout = 8000");
-  db.prepare("UPDATE orders SET status = 'pending_payment' WHERE id = ?").run(order.id);
-  db.close();
+  await devdb.setOrderStatus(order.id, "pending_payment");
   S.orderId = order.id;
 });
 
@@ -409,8 +405,8 @@ for (const s of steps) {
     break;
   }
 }
-devdb.revokeAll();
-devdb.close();
+await devdb.revokeAll();
+await devdb.close();
 await browser.close();
 log(`\n${MODE}: ${results.filter((r) => r.ok).length}/${steps.length} passos ok · capturas em ${SHOTS}`);
 if (S.orderId) log(`pedido: ${S.orderId}${S.signedBytes ? ` · PDF assinado baixado (${S.signedBytes} bytes)` : ""}`);

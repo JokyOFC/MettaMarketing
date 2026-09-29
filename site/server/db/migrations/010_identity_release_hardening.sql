@@ -7,12 +7,12 @@
 --    POST /api/brands/:id/identity/release with guidelines copies the draft
 --    over the released text and stamps guidelines_released_at/_by.
 --    Existing text stays released: no draft is created for current rows.
-ALTER TABLE brands ADD COLUMN usage_guidelines_draft TEXT;
-ALTER TABLE brands ADD COLUMN typography_guidelines_draft TEXT;
-ALTER TABLE brands ADD COLUMN guidelines_draft_at TEXT;
-ALTER TABLE brands ADD COLUMN guidelines_draft_by TEXT;
-ALTER TABLE brands ADD COLUMN guidelines_released_at TEXT;
-ALTER TABLE brands ADD COLUMN guidelines_released_by TEXT;
+ALTER TABLE brands ADD COLUMN usage_guidelines_draft MEDIUMTEXT;
+ALTER TABLE brands ADD COLUMN typography_guidelines_draft MEDIUMTEXT;
+ALTER TABLE brands ADD COLUMN guidelines_draft_at VARCHAR(32);
+ALTER TABLE brands ADD COLUMN guidelines_draft_by VARCHAR(64);
+ALTER TABLE brands ADD COLUMN guidelines_released_at VARCHAR(32);
+ALTER TABLE brands ADD COLUMN guidelines_released_by VARCHAR(64);
 
 -- 2. Font licence follows RELEASED brand fonts only (PLATFORM.md §2 rule 5).
 --    Re-sync existing font files of materials linked to a brand font: a draft
@@ -27,18 +27,9 @@ UPDATE material_files
  WHERE media_kind = 'font'
    AND EXISTS (SELECT 1 FROM brand_fonts bf WHERE bf.material_id = material_files.material_id);
 
---    Safety net for new font files (attachUploads, version copies): when the
---    material is linked to brand fonts but none of them is released with
---    distribution allowed, the new file is not distributable.
-CREATE TRIGGER IF NOT EXISTS material_files_font_licence
-AFTER INSERT ON material_files
-WHEN NEW.media_kind = 'font' AND NEW.font_distributable = 1
-  AND EXISTS (SELECT 1 FROM brand_fonts WHERE material_id = NEW.material_id)
-  AND NOT EXISTS (SELECT 1 FROM brand_fonts
-                   WHERE material_id = NEW.material_id AND distribution = 'allowed' AND visibility = 'released')
-BEGIN
-  UPDATE material_files SET font_distributable = 0 WHERE id = NEW.id;
-END;
+--    New font files follow the same rule in the application (attachUploads
+--    and version copies in services/materials.js): no trigger, since shared
+--    MySQL hosting often refuses CREATE TRIGGER.
 
 -- 3. Webhook log retention (routes/webhooks.js prunes unsigned deliveries).
-CREATE INDEX IF NOT EXISTS webhook_events_signed_received ON webhook_events(signature_valid, received_at);
+CREATE INDEX webhook_events_signed_received ON webhook_events(signature_valid, received_at);

@@ -188,7 +188,7 @@ export default function uploadsRoutes(ctx) {
     const info = await inspect(path, file.ext, { ffprobePath: config.ffprobePath });
 
     const id = newId("upl");
-    db.run(
+    await db.run(
       `INSERT INTO uploads (id, user_id, original_name, ext, mime, size_bytes, sha256, storage_key, media_kind,
          width, height, duration_ms, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?)`,
@@ -208,7 +208,7 @@ export default function uploadsRoutes(ctx) {
         now(),
       ],
     );
-    res.status(201).json({ upload: serializeUpload(db.get("SELECT * FROM uploads WHERE id = ?", [id])) });
+    res.status(201).json({ upload: serializeUpload(await db.get("SELECT * FROM uploads WHERE id = ?", [id])) });
   });
 
   // Upload limit for the pages' pickers (they refuse bigger files before
@@ -222,17 +222,17 @@ export default function uploadsRoutes(ctx) {
   });
 
   // Only the uploader sees (and discards) an upload.
-  router.get("/api/uploads/:id", requireAuth, requireCap("materials.upload"), (req, res) => {
-    const row = db.get("SELECT * FROM uploads WHERE id = ? AND user_id = ? AND status != 'discarded'", [req.params.id, req.user.id]);
+  router.get("/api/uploads/:id", requireAuth, requireCap("materials.upload"), async (req, res) => {
+    const row = await db.get("SELECT * FROM uploads WHERE id = ? AND user_id = ? AND status != 'discarded'", [req.params.id, req.user.id]);
     if (!row) throw notFound();
     res.json({ upload: serializeUpload(row) });
   });
 
   router.delete("/api/uploads/:id", requireAuth, requireCap("materials.upload"), async (req, res) => {
-    const row = db.get("SELECT * FROM uploads WHERE id = ? AND user_id = ?", [req.params.id, req.user.id]);
+    const row = await db.get("SELECT * FROM uploads WHERE id = ? AND user_id = ?", [req.params.id, req.user.id]);
     if (!row || row.status === "discarded") throw notFound();
     if (row.status === "attached") throw conflict("Este arquivo já foi anexado a um material. Remova-o pelo material.");
-    db.run("UPDATE uploads SET status = 'discarded' WHERE id = ? AND status = 'uploaded'", [row.id]);
+    await db.run("UPDATE uploads SET status = 'discarded' WHERE id = ? AND status = 'uploaded'", [row.id]);
     await removeStorageIfUnreferenced(ctx, row.storage_key);
     res.status(204).end();
   });

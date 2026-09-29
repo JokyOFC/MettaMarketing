@@ -92,8 +92,8 @@ before(async () => {
   server = await startTestServer({ maxUploadMb: 1 });
   ctx = server.ctx;
   db = server.db;
-  const A = createClientWithBrand(ctx, { name: "Aurora Pagamentos", brandName: "Aurora" });
-  const B = createClientWithBrand(ctx, { name: "Boreal", brandName: "Boreal" });
+  const A = await createClientWithBrand(ctx, { name: "Aurora Pagamentos", brandName: "Aurora" });
+  const B = await createClientWithBrand(ctx, { name: "Boreal", brandName: "Boreal" });
   f.brandA = A.brandId;
   f.clientA = A.clientId;
   f.brandB = B.brandId;
@@ -102,10 +102,10 @@ before(async () => {
   u.designer = await createUser(ctx, { role: "designer", name: "Dora Designer" });
   u.clientA = await createUser(ctx, { role: "client", clientId: A.clientId, name: "Clara Cliente" });
   u.clientB = await createUser(ctx, { role: "client", clientId: B.clientId, name: "Bruno Cliente" });
-  addStaffAccess(ctx, u.manager.id, A.clientId);
-  f.project = createProject(ctx, { brandId: A.brandId, name: "Identidade Aurora", memberIds: [u.designer.id] }).id;
+  await addStaffAccess(ctx, u.manager.id, A.clientId);
+  f.project = (await createProject(ctx, { brandId: A.brandId, name: "Identidade Aurora", memberIds: [u.designer.id] })).id;
   f.campaign = newId("cmp");
-  db.run("INSERT INTO campaigns (id, brand_id, name, created_at, updated_at) VALUES (?, ?, 'Lançamento Pix', ?, ?)", [
+  await db.run("INSERT INTO campaigns (id, brand_id, name, created_at, updated_at) VALUES (?, ?, 'Lançamento Pix', ?, ?)", [
     f.campaign,
     A.brandId,
     now(),
@@ -136,9 +136,9 @@ describe("uploads", () => {
     assert.equal((await a.designer.get(`/api/uploads/${image.id}`)).status, 200);
     assert.equal((await a.clientA.upload("/api/uploads", { buffer: await png(), filename: "x.png" })).status, 403);
 
-    const row = db.get("SELECT storage_key FROM uploads WHERE id = ?", [image.id]);
+    const row = await db.get("SELECT storage_key FROM uploads WHERE id = ?", [image.id]);
     assert.equal((await a.designer.del(`/api/uploads/${image.id}`)).status, 204);
-    assert.equal(db.get("SELECT status FROM uploads WHERE id = ?", [image.id]).status, "discarded");
+    assert.equal((await db.get("SELECT status FROM uploads WHERE id = ?", [image.id])).status, "discarded");
     assert.equal(await ctx.storage.exists(row.storage_key), false);
   });
 
@@ -169,7 +169,7 @@ describe("uploads", () => {
     assert.equal(huge.status, 413);
     assert.equal(storageFiles().length, before);
     await waitFor(() => tmpFiles().length === 0);
-    assert.equal(db.get("SELECT COUNT(*) AS n FROM uploads WHERE original_name IN ('grande.png', 'enorme.png')").n, 0);
+    assert.equal((await db.get("SELECT COUNT(*) AS n FROM uploads WHERE original_name IN ('grande.png', 'enorme.png')")).n, 0);
   });
 
   test("an upload aborted by the client leaves nothing behind", async () => {
@@ -197,7 +197,7 @@ describe("uploads", () => {
     });
     await waitFor(() => tmpFiles().length === 0);
     assert.equal(storageFiles().length, before);
-    assert.equal(db.get("SELECT COUNT(*) AS n FROM uploads WHERE original_name = 'parcial.png'").n, 0);
+    assert.equal((await db.get("SELECT COUNT(*) AS n FROM uploads WHERE original_name = 'parcial.png'")).n, 0);
     // the server is still healthy
     await upload(a.designer, await png(), "depois.png");
   });
@@ -205,11 +205,11 @@ describe("uploads", () => {
   test("stale unattached uploads are discarded with their files", async () => {
     const fresh = await upload(a.designer, await png(), "recente.png");
     const stale = await upload(a.designer, await png(), "antigo.png");
-    db.run("UPDATE uploads SET created_at = ? WHERE id = ?", [new Date(Date.now() - 49 * 3600 * 1000).toISOString(), stale.id]);
-    const key = db.get("SELECT storage_key FROM uploads WHERE id = ?", [stale.id]).storage_key;
+    await db.run("UPDATE uploads SET created_at = ? WHERE id = ?", [new Date(Date.now() - 49 * 3600 * 1000).toISOString(), stale.id]);
+    const key = (await db.get("SELECT storage_key FROM uploads WHERE id = ?", [stale.id])).storage_key;
     assert.ok((await cleanupStaleUploads(ctx)) >= 1);
-    assert.equal(db.get("SELECT status FROM uploads WHERE id = ?", [stale.id]).status, "discarded");
-    assert.equal(db.get("SELECT status FROM uploads WHERE id = ?", [fresh.id]).status, "uploaded");
+    assert.equal((await db.get("SELECT status FROM uploads WHERE id = ?", [stale.id])).status, "discarded");
+    assert.equal((await db.get("SELECT status FROM uploads WHERE id = ?", [fresh.id])).status, "uploaded");
     assert.equal(await ctx.storage.exists(key), false);
   });
 });
@@ -221,7 +221,7 @@ describe("logo lifecycle", () => {
     const created = await a.designer.post("/api/materials", {
       brandId: f.brandA,
       projectId: f.project,
-      categoryId: categoryId(ctx, "logotipo"),
+      categoryId: await categoryId(ctx, "logotipo"),
       title: "Logo principal",
       variant: "principal",
       previewBg: "light",
@@ -251,7 +251,7 @@ describe("logo lifecycle", () => {
     const submitted = await a.designer.post(`/api/materials/${f.logo}/submit`);
     assert.equal(submitted.status, 200);
     assert.equal(submitted.body.material.visibility, "internal_review");
-    assert.ok(db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'material.submitted'", [u.manager.id]));
+    assert.ok(await db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'material.submitted'", [u.manager.id]));
     assert.equal((await a.designer.post(`/api/materials/${f.logo}/submit`)).status, 409);
 
     const preview = await a.manager.post("/api/releases/preview", { materialIds: [f.logo] });
@@ -268,14 +268,14 @@ describe("logo lifecycle", () => {
     const released = await a.manager.post("/api/releases", { materialIds: [f.logo], notifyApp: true, notifyEmail: true, message: "Primeira entrega." });
     assert.equal(released.status, 201, JSON.stringify(released.body));
     assert.equal(released.body.items[0].versionNumber, 1);
-    const row = db.get("SELECT * FROM materials WHERE id = ?", [f.logo]);
+    const row = await db.get("SELECT * FROM materials WHERE id = ?", [f.logo]);
     assert.equal(row.visibility, "released");
     assert.equal(row.approval_status, "pending");
-    assert.equal(db.get("SELECT status FROM material_versions WHERE id = ?", [row.released_version_id]).status, "released");
-    const notice = db.get("SELECT * FROM notifications WHERE user_id = ? AND type = 'material.released'", [u.clientA.id]);
+    assert.equal((await db.get("SELECT status FROM material_versions WHERE id = ?", [row.released_version_id])).status, "released");
+    const notice = await db.get("SELECT * FROM notifications WHERE user_id = ? AND type = 'material.released'", [u.clientA.id]);
     assert.equal(notice.link, `/painel/arquivos?material=${f.logo}`);
     await ctx.mailer.idle();
-    assert.ok(db.get("SELECT 1 FROM email_outbox WHERE to_email = ?", [u.clientA.email]));
+    assert.ok(await db.get("SELECT 1 FROM email_outbox WHERE to_email = ?", [u.clientA.email]));
 
     const seen = await a.clientA.get(`/api/materials/${f.logo}`);
     assert.equal(seen.status, 200);
@@ -301,16 +301,16 @@ describe("logo lifecycle", () => {
     assert.equal((await a.clientA.get(`/api/versions/${f.v2}`)).status, 404);
 
     // the client had approved v1 (slice D records it); v2 must ask again
-    db.run("UPDATE materials SET approval_status = 'approved', approved_version_id = released_version_id WHERE id = ?", [f.logo]);
+    await db.run("UPDATE materials SET approval_status = 'approved', approved_version_id = released_version_id WHERE id = ?", [f.logo]);
     const preview2 = await a.manager.post("/api/releases/preview", { materialIds: [f.logo] });
     assert.equal(preview2.body.items[0].isNewVersion, true);
     assert.equal(preview2.body.items[0].version.number, 2);
     const release2 = await a.manager.post("/api/releases", { materialIds: [f.logo], notifyApp: true });
     assert.equal(release2.status, 201);
-    const after = db.get("SELECT * FROM materials WHERE id = ?", [f.logo]);
+    const after = await db.get("SELECT * FROM materials WHERE id = ?", [f.logo]);
     assert.equal(after.approval_status, "pending");
     assert.equal(after.released_version_id, f.v2);
-    assert.equal(db.get("SELECT status FROM material_versions WHERE material_id = ? AND number = 1", [f.logo]).status, "superseded");
+    assert.equal((await db.get("SELECT status FROM material_versions WHERE material_id = ? AND number = 1", [f.logo])).status, "superseded");
     const clientAfter = await a.clientA.get(`/api/materials/${f.logo}`);
     assert.deepEqual(clientAfter.body.material.versions.map((v) => v.number), [2, 1]);
     assert.equal(clientAfter.body.material.approvalStatus, "pending");
@@ -349,7 +349,7 @@ describe("logo lifecycle", () => {
 describe("renditions", () => {
   test("thumb and preview WebP for images and SVG, served with a private cache", async () => {
     await ctx.jobs.idle();
-    const file = db.get("SELECT * FROM material_files WHERE material_id = ? AND ext = 'png' ORDER BY created_at LIMIT 1", [f.logo]);
+    const file = await db.get("SELECT * FROM material_files WHERE material_id = ? AND ext = 'png' ORDER BY created_at LIMIT 1", [f.logo]);
     assert.equal(file.preview_status, "ready");
     const res = await a.clientA.get(`/api/files/${file.id}/preview/thumb`);
     assert.equal(res.status, 200);
@@ -367,7 +367,7 @@ describe("renditions", () => {
     const created = await a.designer.post("/api/materials", {
       brandId: f.brandA,
       projectId: f.project,
-      categoryId: categoryId(ctx, "logotipo"),
+      categoryId: await categoryId(ctx, "logotipo"),
       title: "Símbolo",
       variant: "simbolo",
       files: [{ uploadId: up.id, role: "original" }],
@@ -392,7 +392,7 @@ describe("renditions", () => {
     const created = await a.designer.post("/api/materials", {
       brandId: f.brandA,
       projectId: f.project,
-      categoryId: categoryId(ctx, "manual-da-marca"),
+      categoryId: await categoryId(ctx, "manual-da-marca"),
       title: "Manual da marca",
       files: [
         { uploadId: doc.id, role: "original" },
@@ -421,7 +421,7 @@ describe("renditions", () => {
     const created = await a.designer.post("/api/materials", {
       brandId: f.brandA,
       projectId: f.project,
-      categoryId: categoryId(ctx, "reels-videos"),
+      categoryId: await categoryId(ctx, "reels-videos"),
       title: "Reels de lançamento",
       files: [{ uploadId: up.id, role: "original" }],
     });
@@ -478,7 +478,7 @@ describe("carousel", () => {
     const release = await a.manager.post("/api/releases", { materialIds: [material.id], notifyApp: true });
     assert.equal(release.status, 201);
     assert.equal(
-      db.get("SELECT link FROM notifications WHERE user_id = ? AND entity_id = ?", [u.clientA.id, material.id]).link,
+      (await db.get("SELECT link FROM notifications WHERE user_id = ? AND entity_id = ?", [u.clientA.id, material.id])).link,
       `/painel/conteudo/${material.id}`,
     );
     // released versions can no longer be reordered
@@ -508,7 +508,7 @@ describe("organisation", () => {
       const res = await a.designer.post("/api/materials", {
         brandId: f.brandA,
         projectId: f.project,
-        categoryId: categoryId(ctx, "logotipo"),
+        categoryId: await categoryId(ctx, "logotipo"),
         title,
         variant: "escura",
         files: [{ uploadId: up.id }],
@@ -521,12 +521,12 @@ describe("organisation", () => {
     const swap = await a.designer.post(`/api/materials/${second}/primary`);
     assert.equal(swap.status, 200);
     assert.equal(swap.body.previousId, first);
-    assert.equal(db.get("SELECT is_primary FROM materials WHERE id = ?", [first]).is_primary, 0);
-    assert.equal(db.get("SELECT is_primary FROM materials WHERE id = ?", [second]).is_primary, 1);
+    assert.equal((await db.get("SELECT is_primary FROM materials WHERE id = ?", [first])).is_primary, 0);
+    assert.equal((await db.get("SELECT is_primary FROM materials WHERE id = ?", [second])).is_primary, 1);
 
     const reorder = await a.designer.post("/api/materials/reorder", { ids: [second, first] });
     assert.equal(reorder.status, 200);
-    const order = db.all("SELECT id FROM materials WHERE id IN (?, ?) ORDER BY sort_order", [first, second]).map((r) => r.id);
+    const order = (await db.all("SELECT id FROM materials WHERE id IN (?, ?) ORDER BY sort_order", [first, second])).map((r) => r.id);
     assert.deepEqual(order, [second, first]);
     assert.equal((await a.designer.post("/api/materials/reorder", { ids: [second, f.logo] })).status, 200, "same slot (logotipo)");
     f.dark = [first, second];
@@ -538,7 +538,7 @@ describe("organisation", () => {
     assert.equal(res.status, 200);
     assert.equal(res.body.updated, 2);
     assert.deepEqual(res.body.skipped, [{ id: foreign, reason: "Material não encontrado." }]);
-    assert.ok(db.get("SELECT archived_at FROM materials WHERE id = ?", [f.dark[0]]).archived_at);
+    assert.ok((await db.get("SELECT archived_at FROM materials WHERE id = ?", [f.dark[0]])).archived_at);
     const again = await a.manager.post("/api/materials/bulk", { ids: [f.dark[0]], action: "archive" });
     assert.equal(again.body.updated, 0);
     assert.equal(again.body.skipped[0].reason, "Este material já está arquivado.");
@@ -547,7 +547,7 @@ describe("organisation", () => {
     assert.equal(restore.body.updated, 2);
     const invalid = await a.manager.post("/api/materials/bulk", { ids: f.dark, action: "explode" });
     assert.equal(invalid.status, 422);
-    const moved = await a.manager.post("/api/materials/bulk", { ids: f.dark, action: "set_category", value: categoryId(ctx, "identidade-visual") });
+    const moved = await a.manager.post("/api/materials/bulk", { ids: f.dark, action: "set_category", value: await categoryId(ctx, "identidade-visual") });
     assert.equal(moved.body.updated, 2);
   });
 
@@ -558,7 +558,7 @@ describe("organisation", () => {
     const off = await a.manager.patch(`/api/materials/${f.logo}`, { downloadEnabled: false });
     assert.equal(off.status, 200);
     assert.equal(off.body.material.downloadEnabled, false);
-    assert.ok(db.get("SELECT 1 FROM activity_log WHERE material_id = ? AND action = 'material.download_disabled' AND visibility = 'client'", [f.logo]));
+    assert.ok(await db.get("SELECT 1 FROM activity_log WHERE material_id = ? AND action = 'material.download_disabled' AND visibility = 'client'", [f.logo]));
     await a.manager.patch(`/api/materials/${f.logo}`, { downloadEnabled: true });
     const invalid = await a.manager.patch(`/api/materials/${f.logo}`, { variant: "neon", dueDate: "2026-02-30" });
     assert.equal(invalid.status, 422);
@@ -566,32 +566,32 @@ describe("organisation", () => {
   });
 
   test("files of released versions stay; drafts can drop files", async () => {
-    const released = db.get("SELECT id FROM material_files WHERE version_id = ? LIMIT 1", [f.v2]);
+    const released = await db.get("SELECT id FROM material_files WHERE version_id = ? LIMIT 1", [f.v2]);
     assert.equal((await a.designer.del(`/api/files/${released.id}`)).status, 409);
     const up = await upload(a.designer, await png(), "rascunho.png");
     const draft = await a.designer.post("/api/materials", {
       brandId: f.brandA,
       projectId: f.project,
-      categoryId: categoryId(ctx, "materiais-adicionais"),
+      categoryId: await categoryId(ctx, "materiais-adicionais"),
       title: "Rascunho descartável",
       files: [{ uploadId: up.id }],
     });
     const fileId = draft.body.material.versions[0].files[0].id;
     await ctx.jobs.idle();
     const keys = [
-      db.get("SELECT storage_key FROM material_files WHERE id = ?", [fileId]).storage_key,
-      ...db.all("SELECT storage_key FROM file_renditions WHERE file_id = ?", [fileId]).map((r) => r.storage_key),
+      (await db.get("SELECT storage_key FROM material_files WHERE id = ?", [fileId])).storage_key,
+      ...(await db.all("SELECT storage_key FROM file_renditions WHERE file_id = ?", [fileId])).map((r) => r.storage_key),
     ];
     assert.equal((await a.designer.del(`/api/files/${fileId}`)).status, 204);
     for (const key of keys) assert.equal(await ctx.storage.exists(key), false);
-    assert.equal(db.get("SELECT status FROM uploads WHERE id = ?", [up.id]).status, "discarded");
+    assert.equal((await db.get("SELECT status FROM uploads WHERE id = ?", [up.id])).status, "discarded");
   });
 });
 
 describe("final files after approval", () => {
   test("finals stay hidden until delivered, then reach the client", async () => {
     // client approved v2 (slice D)
-    db.run("UPDATE materials SET approval_status = 'approved', approved_version_id = ? WHERE id = ?", [f.v2, f.logo]);
+    await db.run("UPDATE materials SET approval_status = 'approved', approved_version_id = ? WHERE id = ?", [f.v2, f.logo]);
     const original = await upload(a.designer, await png(), "extra.png");
     const wrongRole = await a.designer.post(`/api/versions/${f.v2}/files`, { files: [{ uploadId: original.id, role: "original" }] });
     assert.equal(wrongRole.status, 422);
@@ -609,7 +609,7 @@ describe("final files after approval", () => {
     assert.ok(!clientView.body.material.versions[0].files.some((file) => file.id === finalId));
     assert.equal((await a.clientA.post("/api/downloads/link", { fileId: finalId })).status, 404);
     assert.equal((await a.clientA.get(`/api/files/${finalId}/preview/thumb`)).status, 404);
-    assert.equal(db.get("SELECT approval_status FROM materials WHERE id = ?", [f.logo]).approval_status, "approved");
+    assert.equal((await db.get("SELECT approval_status FROM materials WHERE id = ?", [f.logo])).approval_status, "approved");
 
     assert.equal((await a.designer.post(`/api/materials/${f.logo}/deliver`)).status, 403);
     const delivered = await a.manager.post(`/api/materials/${f.logo}/deliver`, { notifyEmail: false });
@@ -625,8 +625,8 @@ describe("final files after approval", () => {
     assert.equal(after.body.material.deliveredAt !== null, true);
     assert.equal(after.body.material.approvalStatus, "approved", "delivery never changes approval");
     assert.equal((await a.clientA.post("/api/downloads/link", { fileId: finalId })).status, 200);
-    assert.ok(db.get("SELECT 1 FROM activity_log WHERE material_id = ? AND action = 'material.delivered' AND visibility = 'client'", [f.logo]));
-    assert.ok(db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'material.delivered'", [u.clientA.id]));
+    assert.ok(await db.get("SELECT 1 FROM activity_log WHERE material_id = ? AND action = 'material.delivered' AND visibility = 'client'", [f.logo]));
+    assert.ok(await db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'material.delivered'", [u.clientA.id]));
   });
 });
 
@@ -636,7 +636,7 @@ describe("kits", () => {
     const pattern = await a.designer.post("/api/materials", {
       brandId: f.brandA,
       projectId: f.project,
-      categoryId: categoryId(ctx, "identidade-visual"),
+      categoryId: await categoryId(ctx, "identidade-visual"),
       title: "Padrão gráfico",
       files: [{ uploadId: up.id }],
     });
@@ -659,7 +659,7 @@ describe("kits", () => {
     const released = await a.manager.post(`/api/kits/${kitId}/release`, { notifyApp: true });
     assert.equal(released.status, 201, JSON.stringify(released.body));
     assert.equal(released.body.kit.status, "released");
-    assert.equal(db.get("SELECT visibility FROM materials WHERE id = ?", [draftId]).visibility, "released");
+    assert.equal((await db.get("SELECT visibility FROM materials WHERE id = ?", [draftId])).visibility, "released");
 
     const clientKit = await a.clientA.get(`/api/kits/${kitId}`);
     assert.equal(clientKit.status, 200);
@@ -686,7 +686,7 @@ async function deliveredLogo(title, slug) {
   const created = await a.designer.post("/api/materials", {
     brandId: f.brandA,
     projectId: f.project,
-    categoryId: categoryId(ctx, "logotipo"),
+    categoryId: await categoryId(ctx, "logotipo"),
     title,
     files: [{ uploadId: original.id, role: "original" }],
   });
@@ -694,14 +694,14 @@ async function deliveredLogo(title, slug) {
   const id = created.body.material.id;
   const v1 = created.body.material.versions[0].id;
   assert.equal((await a.manager.post("/api/releases", { materialIds: [id], notifyApp: false })).status, 201);
-  db.run("UPDATE materials SET approval_status = 'approved', approved_version_id = released_version_id WHERE id = ?", [id]);
+  await db.run("UPDATE materials SET approval_status = 'approved', approved_version_id = released_version_id WHERE id = ?", [id]);
   const final = await upload(a.designer, await png({ width: 1200, height: 600, color: "#1e2618" }), `${slug}-final.png`);
   const added = await a.designer.post(`/api/versions/${v1}/files`, { files: [{ uploadId: final.id, role: "final" }] });
   assert.equal(added.status, 201, JSON.stringify(added.body));
   const delivered = await a.manager.post(`/api/materials/${id}/deliver`, { notifyApp: false, notifyEmail: false });
   assert.equal(delivered.status, 200, JSON.stringify(delivered.body));
   assert.equal(delivered.body.mode, "finals");
-  assert.ok(db.get("SELECT delivered_at FROM materials WHERE id = ?", [id]).delivered_at);
+  assert.ok((await db.get("SELECT delivered_at FROM materials WHERE id = ?", [id])).delivered_at);
   return { id, v1, finalId: added.body.fileIds[0] };
 }
 
@@ -727,7 +727,7 @@ describe("new versions and final files", () => {
     assert.ok(!preview.body.warnings.some((text) => /copiad/.test(text)));
     assert.equal((await a.manager.post("/api/releases", { materialIds: [logo.id], notifyApp: false })).status, 201);
 
-    const row = db.get("SELECT * FROM materials WHERE id = ?", [logo.id]);
+    const row = await db.get("SELECT * FROM materials WHERE id = ?", [logo.id]);
     assert.equal(row.approval_status, "pending", "a new version asks for a new approval");
     assert.equal(row.delivered_at, null, "not delivered while it waits for approval");
     const clientView = (await a.clientA.get(`/api/materials/${logo.id}`)).body.material;
@@ -748,7 +748,7 @@ describe("new versions and final files", () => {
     const v2 = (await a.designer.post(`/api/materials/${logo.id}/versions`, { files: [{ uploadId: next.id, role: "original" }] })).body.version;
     // what the old copy did: v1's final duplicated into v2, published
     const copyId = newId("fil");
-    db.run(
+    await db.run(
       `INSERT INTO material_files (id, version_id, material_id, role, position, original_name, display_name, ext, mime, size_bytes,
          sha256, storage_key, media_kind, width, height, duration_ms, preview_status, font_distributable, created_by, created_at, published)
        SELECT ?, ?, material_id, role, position, original_name, display_name, ext, mime, size_bytes, sha256, storage_key, media_kind,
@@ -765,10 +765,10 @@ describe("new versions and final files", () => {
     );
     assert.equal((await a.manager.post("/api/releases", { materialIds: [logo.id], notifyApp: false })).status, 201);
 
-    const row = db.get("SELECT delivered_at, approval_status FROM materials WHERE id = ?", [logo.id]);
+    const row = await db.get("SELECT delivered_at, approval_status FROM materials WHERE id = ?", [logo.id]);
     assert.equal(row.delivered_at, null);
     assert.equal(row.approval_status, "pending");
-    assert.equal(db.get("SELECT published FROM material_files WHERE id = ?", [copyId]).published, 0);
+    assert.equal((await db.get("SELECT published FROM material_files WHERE id = ?", [copyId])).published, 0);
     const clientView = (await a.clientA.get(`/api/materials/${logo.id}`)).body.material;
     assert.ok(!clientView.versions[0].files.some((file) => file.id === copyId));
     assert.equal((await a.manager.get(`/api/materials/${logo.id}`)).body.material.pendingDeliveryCount, 1);
@@ -783,14 +783,14 @@ describe("delivery of originals", () => {
     const created = await a.designer.post("/api/materials", {
       brandId: f.brandA,
       projectId: f.project,
-      categoryId: categoryId(ctx, "materiais-adicionais"),
+      categoryId: await categoryId(ctx, "materiais-adicionais"),
       title: "Arte avulsa",
       files: [{ uploadId: art.id, role: "original" }],
     });
     const id = created.body.material.id;
     assert.equal(created.body.material.deliverableWithoutFinals, false, "not released yet");
     assert.equal((await a.manager.post("/api/releases", { materialIds: [id], notifyApp: false })).status, 201);
-    db.run("UPDATE materials SET approval_status = 'approved', approved_version_id = released_version_id WHERE id = ?", [id]);
+    await db.run("UPDATE materials SET approval_status = 'approved', approved_version_id = released_version_id WHERE id = ?", [id]);
     const before = (await a.manager.get(`/api/materials/${id}`)).body.material;
     assert.equal(before.deliverableWithoutFinals, true);
     assert.equal(before.permissions.canDeliver, true);
@@ -809,10 +809,10 @@ describe("delivery of originals", () => {
     assert.equal(delivered.body.appRecipients, 1);
     assert.equal(delivered.body.emailRecipients, 1);
 
-    const entry = db.get("SELECT * FROM activity_log WHERE material_id = ? AND action = 'material.delivered'", [id]);
+    const entry = await db.get("SELECT * FROM activity_log WHERE material_id = ? AND action = 'material.delivered'", [id]);
     assert.equal(entry.visibility, "client");
     assert.match(entry.summary, /^Gil Gestor marcou “Arte avulsa” como entregue/);
-    assert.ok(db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'material.delivered' AND entity_id = ?", [u.clientA.id, id]));
+    assert.ok(await db.get("SELECT 1 FROM notifications WHERE user_id = ? AND type = 'material.delivered' AND entity_id = ?", [u.clientA.id, id]));
     assert.ok((await a.clientA.get(`/api/materials/${id}`)).body.material.deliveredAt);
     const again = await a.manager.post(`/api/materials/${id}/deliver`);
     assert.equal(again.status, 409);
@@ -827,7 +827,7 @@ describe("notices report what was really sent", () => {
       const res = await a.designer.post("/api/materials", {
         brandId: f.brandA,
         projectId: f.project,
-        categoryId: categoryId(ctx, "apresentacoes"),
+        categoryId: await categoryId(ctx, "apresentacoes"),
         title,
         files: [{ uploadId: up.id }],
       });
@@ -843,11 +843,11 @@ describe("notices report what was really sent", () => {
     assert.equal(released.body.appRecipients, 1);
     assert.equal(released.body.emailRecipients, 1);
     await ctx.mailer.idle();
-    const outbox = db.get("SELECT status FROM email_outbox WHERE to_email = ? ORDER BY created_at DESC LIMIT 1", [u.clientA.email]);
+    const outbox = await db.get("SELECT status FROM email_outbox WHERE to_email = ? ORDER BY created_at DESC LIMIT 1", [u.clientA.email]);
     assert.equal(outbox.status, "not_configured", "recorded, never pretended");
 
     // people who turned e-mail notices off are not counted; no notice -> zero
-    db.run("UPDATE users SET notify_email = 0 WHERE id = ?", [u.clientA.id]);
+    await db.run("UPDATE users SET notify_email = 0 WHERE id = ?", [u.clientA.id]);
     try {
       const second = await make("Apresentação de resultados");
       const quiet = await a.manager.post("/api/releases", { materialIds: [second], notifyApp: true, notifyEmail: true });
@@ -857,7 +857,7 @@ describe("notices report what was really sent", () => {
       const silent = await a.manager.post("/api/releases", { materialIds: [third], notifyApp: false, notifyEmail: false });
       assert.deepEqual([silent.body.appRecipients, silent.body.emailRecipients], [0, 0]);
     } finally {
-      db.run("UPDATE users SET notify_email = 1 WHERE id = ?", [u.clientA.id]);
+      await db.run("UPDATE users SET notify_email = 1 WHERE id = ?", [u.clientA.id]);
     }
 
     const fourth = await make("Apresentação do kit");
@@ -876,35 +876,35 @@ describe("history of download availability (D2)", () => {
     const created = await a.designer.post("/api/materials", {
       brandId: f.brandA,
       projectId: f.project,
-      categoryId: categoryId(ctx, "materiais-adicionais"),
+      categoryId: await categoryId(ctx, "materiais-adicionais"),
       title: "Guia rápido",
       files: [{ uploadId: up.id }],
     });
     const id = created.body.material.id;
     await a.manager.post("/api/releases", { materialIds: [id], notifyApp: false });
-    const entriesAfter = (since) =>
-      db.all("SELECT action, summary, visibility, data FROM activity_log WHERE material_id = ? AND rowid > ? ORDER BY rowid", [id, since]);
-    const mark = () => db.get("SELECT MAX(rowid) AS n FROM activity_log").n;
+    const entriesAfter = async (since) =>
+      await db.all("SELECT action, summary, visibility, data FROM activity_log WHERE material_id = ? AND id > ? ORDER BY id", [id, since]);
+    const mark = async () => (await db.get("SELECT MAX(id) AS n FROM activity_log")).n;
 
-    let since = mark();
+    let since = await mark();
     assert.equal((await a.manager.patch(`/api/materials/${id}`, { downloadEnabled: false })).status, 200);
-    let entries = entriesAfter(since);
+    let entries = await entriesAfter(since);
     assert.equal(entries.length, 1, JSON.stringify(entries));
     assert.equal(entries[0].action, "material.download_disabled");
     assert.equal(entries[0].visibility, "client");
     assert.equal(entries[0].summary, "Gil Gestor bloqueou o download de “Guia rápido”.");
 
-    since = mark();
+    since = await mark();
     assert.equal((await a.manager.patch(`/api/materials/${id}`, { downloadEnabled: true, description: "Versão para impressão" })).status, 200);
-    entries = entriesAfter(since);
+    entries = await entriesAfter(since);
     assert.deepEqual(entries.map((entry) => entry.action), ["material.updated", "material.download_enabled"]);
     assert.deepEqual(JSON.parse(entries[0].data).fields, ["description"]);
     assert.equal(entries[1].summary, "Gil Gestor liberou o download de “Guia rápido”.");
 
-    since = mark();
+    since = await mark();
     const bulk = await a.manager.post("/api/materials/bulk", { ids: [id], action: "disable_download" });
     assert.equal(bulk.body.updated, 1);
-    entries = entriesAfter(since);
+    entries = await entriesAfter(since);
     assert.equal(entries.length, 1);
     assert.match(entries[0].summary, /^Gil Gestor bloqueou o download/);
 
@@ -921,7 +921,7 @@ describe("materials without a project or contracted service", () => {
     const up = await upload(a.manager, await png(), "avulso.png");
     const created = await a.manager.post("/api/materials", {
       brandId: f.brandA,
-      categoryId: categoryId(ctx, "materiais-adicionais"),
+      categoryId: await categoryId(ctx, "materiais-adicionais"),
       title: "Material sem projeto",
       files: [{ uploadId: up.id }],
     });
@@ -980,7 +980,7 @@ describe("upload limit", () => {
     assert.equal(answer.body.error.code, "payload_too_large");
     assert.equal(answer.body.error.message, "O arquivo ultrapassa o limite de 1 MB.");
     assert.equal(answer.body.error.maxBytes, 1024 * 1024);
-    assert.equal(db.get("SELECT COUNT(*) AS n FROM uploads WHERE original_name = 'enorme.png'").n, 0);
+    assert.equal((await db.get("SELECT COUNT(*) AS n FROM uploads WHERE original_name = 'enorme.png'")).n, 0);
     // the server is still healthy
     await upload(a.designer, await png(), "depois-do-grande.png");
   });
