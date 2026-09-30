@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Plus, X } from "lucide-react";
-import { Button, Drawer, Field, IconButton, Input, Segmented, Switch, Textarea } from "../../ui/index.js";
+import { Button, Drawer, Field, IconButton, Input, Segmented, Select, Switch, Textarea } from "../../ui/index.js";
 import { api } from "../../api/client.js";
+import { siteOffers } from "../../../data/brand.js";
 import { Callout, MoneyInput } from "../finance/common.jsx";
 import { useInvalidFocus } from "../clients/crmShared.jsx";
 
@@ -18,6 +19,7 @@ const blank = {
   items: [""],
   includesEditables: false,
   active: true,
+  slug: "",
 };
 
 function fromService(service) {
@@ -30,8 +32,13 @@ function fromService(service) {
     items: service.items?.length ? [...service.items] : [""],
     includesEditables: service.includesEditables,
     active: service.active,
+    slug: service.slug ?? "",
   };
 }
+
+// "Comprar" buttons of the site (/planos) that this kind of service can answer.
+const offerLabel = (offer) => (offer.kind === "subscription" ? `Plano ${offer.name}` : offer.name);
+const offersFor = (kind) => siteOffers.filter((offer) => offer.kind === kind);
 
 // Included items: one row per line, reorderable without drag (keyboard and touch).
 function ItemsEditor({ items, onChange, errors }) {
@@ -142,6 +149,7 @@ export default function ServiceDrawer({ open, service, onClose, onSaved }) {
       items: form.items.map((item) => item.trim()).filter(Boolean),
       includesEditables: form.includesEditables,
       active: form.active,
+      slug: form.slug || null,
     };
     try {
       const res = editing ? await api.patch(`/services/${service.id}`, body) : await api.post("/services", body);
@@ -187,7 +195,12 @@ export default function ServiceDrawer({ open, service, onClose, onSaved }) {
               Tipo de cobrança
             </span>
           </div>
-          <Segmented aria-label="Tipo de cobrança" options={KINDS.map((k) => ({ ...k, disabled: used && k.value !== form.kind }))} value={form.kind} onChange={(kind) => update({ kind })} />
+          <Segmented
+            aria-label="Tipo de cobrança"
+            options={KINDS.map((k) => ({ ...k, disabled: used && k.value !== form.kind }))}
+            value={form.kind}
+            onChange={(kind) => update({ kind, slug: offersFor(kind).some((offer) => offer.slug === form.slug) ? form.slug : "" })}
+          />
           {used ? (
             <p className="ui-field__hint">O tipo não muda depois que o serviço foi usado em pedidos ou assinaturas.</p>
           ) : (
@@ -204,7 +217,29 @@ export default function ServiceDrawer({ open, service, onClose, onSaved }) {
           <MoneyInput value={form.priceCents} onValueChange={(priceCents) => update({ priceCents })} suffix={form.kind === "subscription" ? "por mês" : undefined} />
         </Field>
 
-        <Field label="Descrição" optional error={errors.description} hint="Aparece para a equipe ao criar pedidos e assinaturas.">
+        <Field
+          label="Botão de compra no site"
+          optional
+          error={errors.slug}
+          hint={
+            form.slug
+              ? "Quem clica em “Comprar” desse item em /planos compra este serviço, pelo preço daqui, e paga no Mercado Pago. O contrato vai depois do pagamento."
+              : "Ligue a um botão “Comprar” de /planos para vender este serviço pelo site."
+          }
+        >
+          <Select
+            value={form.slug}
+            onValueChange={(slug) => update({ slug })}
+            options={[{ value: "", label: "Nenhum" }, ...offersFor(form.kind).map((offer) => ({ value: offer.slug, label: offerLabel(offer) }))]}
+          />
+        </Field>
+
+        <Field
+          label="Descrição"
+          optional
+          error={errors.description}
+          hint="Aparece para a equipe ao criar pedidos e assinaturas e, com o botão do site ligado, na página de compra do cliente."
+        >
           <Textarea value={form.description} rows={3} maxLength={1000} autoGrow onValueChange={(description) => update({ description })} />
         </Field>
 

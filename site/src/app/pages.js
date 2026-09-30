@@ -13,6 +13,7 @@ export const ClientProjects = lazy(() => import("./client/projects/ClientProject
 export const ClientBriefings = lazy(() => import("./client/briefings/ClientBriefings.jsx"));
 export const BriefingForm = lazy(() => import("./client/briefings/BriefingForm.jsx"));
 export const ClientBilling = lazy(() => import("./client/billing/ClientBilling.jsx"));
+export const Purchase = lazy(() => import("./client/purchase/Purchase.jsx"));
 export const ClientNotifications = lazy(() => import("./client/notifications/ClientNotifications.jsx"));
 export const ClientHistory = lazy(() => import("./client/history/ClientHistory.jsx"));
 export const Account = lazy(() => import("./client/account/Account.jsx"));

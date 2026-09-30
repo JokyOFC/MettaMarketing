@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { whatsappUrl, whatsappNumber } from "../data/brand.js";
+import { Link } from "react-router-dom";
+import { identityOffer, purchasePath, whatsappUrl, whatsappNumber } from "../data/brand.js";
 export function WhatsAppLink() {
   return (
     <a
@@ -22,38 +22,34 @@ export function WhatsAppLink() {
     </a>
   );
 }
-export function PurchaseButton({ identity = false }) {
-  const [notice, setNotice] = useState(false);
+// Starts the online purchase: the client area confirms the item and the price,
+// then the payment happens on Mercado Pago. Visitors without an account create
+// one first (RequireAuth sends them to /cadastro and back).
+export function PurchaseButton({ slug, identity = false, planName }) {
   return (
-    <>
-      <button type="button" className="button" onClick={() => setNotice(true)}>
-        {identity ? "Comprar identidade visual" : "Comprar este plano"}
-        <span aria-hidden="true">↗</span>
-      </button>
-      {notice && (
-        <p className="purchase-notice" role="status">
-          A compra online estará disponível em breve.
-        </p>
-      )}
-    </>
+    <Link className="button" to={purchasePath(slug)}>
+      {identity ? "Comprar identidade visual" : "Comprar este plano"}
+      {planName && <span className="sr-only"> {planName}</span>}
+      <span aria-hidden="true">↗</span>
+    </Link>
   );
 }
 export function IdentityBanner() {
   return (
     <aside
       className="identity-banner"
-      aria-label="Identidade visual por R$ 2.000"
+      aria-label={`Identidade visual por R$ ${identityOffer.price}`}
     >
       <div>
         <span className="identity-label">IDENTIDADE VISUAL</span>
         <h3>
           Tenha sua identidade visual
           <br />
-          <em>por R$ 2.000.</em>
+          <em>por R$ {identityOffer.price}.</em>
         </h3>
       </div>
       <div className="identity-action">
-        <PurchaseButton identity />
+        <PurchaseButton slug={identityOffer.slug} identity />
       </div>
     </aside>
   );

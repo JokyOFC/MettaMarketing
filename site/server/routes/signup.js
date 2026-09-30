@@ -10,7 +10,7 @@ import { adminIds, notify } from "../lib/notify.js";
 import { serializeMe } from "../lib/serialize.js";
 import { getSetting } from "../lib/settings.js";
 import { now } from "../lib/time.js";
-import { parse, schemas, z } from "../lib/validate.js";
+import { documentProblem, parse, schemas, z } from "../lib/validate.js";
 
 const SIGNUPS_PER_IP = { max: 5, windowMs: 60 * 60 * 1000 };
 const EMAIL_TAKEN = "Este e-mail já tem um acesso. Entre com a sua senha ou use “Esqueci minha senha”.";
@@ -28,13 +28,6 @@ const signupSchema = z.object({
   // Honeypot: hidden from people, filled by bots.
   website: z.string().max(200).optional(),
 });
-
-// CPF (11 digits) or CNPJ (14 digits), with or without punctuation.
-function documentProblem(document) {
-  if (!document) return null;
-  const digits = document.replace(/\D/g, "");
-  return digits.length === 11 || digits.length === 14 ? null : "Informe um CPF (11 dígitos) ou um CNPJ (14 dígitos).";
-}
 
 // In-memory counter per key within a window (one per app instance).
 function windowLimiter({ max, windowMs }) {

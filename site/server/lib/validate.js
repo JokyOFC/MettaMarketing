@@ -89,6 +89,13 @@ export const schemas = {
   ids: z.array(z.string().min(1).max(64)).max(500),
 };
 
+// CPF (11 digits) or CNPJ (14 digits), with or without punctuation. -> message | null
+export function documentProblem(document) {
+  if (!document) return null;
+  const digits = String(document).replace(/\D/g, "");
+  return digits.length === 11 || digits.length === 14 ? null : "Informe um CPF (11 dígitos) ou um CNPJ (14 dígitos).";
+}
+
 // ?page=&pageSize= (max 200) -> { page, pageSize, limit, offset }
 export function paginate(query = {}, { defaultSize = 50, max = 200 } = {}) {
   const page = Math.max(1, Number.parseInt(query.page, 10) || 1);

@@ -126,7 +126,9 @@ portal.access
   ativo na hora), com aceite LGPD (`users.terms_accepted_at`). Não há confirmação por
   e-mail nem dependência de SMTP: ela já entra na área do cliente, os administradores
   recebem o aviso `client.signed_up` e a equipe então cria marcas, gestores, pedidos ou
-  planos.
+  planos. A pessoa também pode contratar sozinha um plano ou a identidade visual pelos
+  botões "Comprar" do site (§6.2): quem chega por eles cai no cadastro e volta direto para a
+  compra.
 - Proteções do cadastro: campo-armadilha para robôs, limite por IP e senha com as mesmas
   regras do convite. Um e-mail que já tem acesso é recusado com orientação para entrar ou
   recuperar a senha (sem a confirmação por e-mail, o cadastro não consegue esconder que o
@@ -329,7 +331,8 @@ identidade visual (pedido), a Metta gera o contrato e o envia para assinatura na
 - **Pagamento depois da assinatura** (configurável, padrão ligado, só com a integração
   configurada): o cliente não abre o checkout do pedido nem vê o link de autorização da
   assinatura até o contrato ficar `completed`. A equipe pode **dispensar** o contrato de um item
-  (com motivo, no histórico), por exemplo quando foi assinado fora da plataforma.
+  (com motivo, no histórico), por exemplo quando foi assinado fora da plataforma. Não vale para
+  compras feitas pelo site: essas são pagas primeiro e recebem o contrato depois (§6.2).
 - **Vocabulário honesto:** a AssinaVelox registra **aceite eletrônico com evidências**; a
   plataforma mostra o rótulo que a própria AssinaVelox devolve (`signature_status_label`) e diz
   "Concluído", nunca "assinatura digital" genérica.
@@ -337,6 +340,47 @@ identidade visual (pedido), a Metta gera o contrato e o envia para assinatura na
   veem os seus, depois de enviados. Arquivos saem por `/api/contracts/:id/files/:tipo` com
   checagem a cada requisição.
 - **SDK:** cópia do SDK Node da AssinaVelox em `server/vendor/assinavelox-sdk` (ver `VENDOR.md`).
+
+### 6.2 Compra pelo site (pagar primeiro, contrato depois)
+
+Os botões "Comprar" de `/planos` e da página inicial vendem pelo site. Cada botão tem um
+identificador (`siteOffers` em `src/data/brand.js`: `presenca`, `gestao`, `estrategia`,
+`identidade-visual`) ligado a um serviço do catálogo por `services.slug` (Planos e serviços ›
+"Botão de compra no site": um botão por serviço, do mesmo tipo; serviço inativo não é vendido).
+O preço cobrado é sempre o do catálogo, mostrado de novo antes do pagamento.
+
+- **Fluxo:** botão → `/painel/contratar/:slug`. Sem sessão, a pessoa vai para
+  `/cadastro?next=…` ("Entrar" e "Criar conta" preservam o destino) e volta direto para a
+  confirmação: item, preço, itens incluídos e próximos passos. Planos pedem o e-mail da conta do
+  Mercado Pago (padrão: o de quem compra); empresas sem CPF/CNPJ informam o documento, que vai no
+  contrato. O botão leva ao Checkout Pro (serviço avulso, pedido) ou à autorização da cobrança
+  mensal (`/preapproval` sem plano associado, assinatura); o retorno cai em
+  `/painel/financeiro?retorno=…`, que acompanha a confirmação.
+- **O que fica registrado:** pedido ou assinatura do cliente com `created_by` = quem comprou e
+  `contract_after_payment = 1`. Clicar de novo retoma o mesmo item e o mesmo link; outro e-mail
+  de pagador gera um link novo e cancela o antigo; outro plano escolhido antes de autorizar
+  cancela o anterior no Mercado Pago; um pedido em aberto com preço antigo é substituído. Planos
+  são um de cada vez: com um plano ativo (ou uma assinatura preparada pela equipe), a compra de
+  plano é recusada e a página orienta a falar com a Metta ou ir a Financeiro. Falha no Mercado
+  Pago não deixa rascunho para trás. Um clique por vez por cliente.
+- **Pagamento primeiro:** nessas compras o contrato nunca segura o pagamento, mesmo com
+  "Pagamento depois da assinatura" ligado (§6.1).
+- **Contrato depois do pagamento:** quando o Mercado Pago confirma (pedido pago, assinatura
+  autorizada), a fila `contracts.after_payment` gera o contrato com o modelo atual e o envia para
+  a pessoa que comprou assinar (ou outro acesso ativo do cliente), sem ninguém da Metta apertar
+  botão (`sendContractAfterPayment`; sem autor, histórico "gerado automaticamente depois do
+  pagamento"). Roda uma vez por item (`contract_auto_at`) e nunca duplica contrato em andamento;
+  a varredura periódica de `jobs/contracts.js` retoma o que um reinício deixou para trás. Se o
+  contrato não puder sair (AssinaVelox não configurada, representante, foro ou modelos
+  pendentes), financeiro e administradores recebem "Envie o contrato" com o motivo e enviam pelo
+  pedido ou assinatura, que aceitam contrato mesmo pagos. A equipe também pode dispensá-lo.
+- **Avisos:** o cliente recebe a confirmação do pagamento e, com os contratos prontos, o aviso de
+  que o contrato chega em Financeiro; financeiro e administradores recebem "Nova compra pelo
+  site" ou "Nova assinatura pelo site" (também por e-mail). Falhas no envio de um contrato
+  automático avisam financeiro e administradores.
+- **Credenciais:** as duas modalidades usam o mesmo `MP_ACCESS_TOKEN` (Checkout Pro para avulsos,
+  API de assinaturas para planos). Sem Mercado Pago, a confirmação diz que o pagamento online
+  está indisponível e nada é criado.
 
 ## 7. Experiência visual do produto
 
@@ -384,6 +428,12 @@ Segue `DESIGN_SYSTEM.md`, adaptado à produtividade.
 - Cadastro pelo site: `node e2e/signup.mjs --base http://127.0.0.1:5173 [--mobile] [--shots <pasta>]`
   preenche `/cadastro`, chega à área do cliente já conectado, entra de novo com a senha
   criada em outra sessão e confere o aviso e a marcação "Cadastro pelo site" no painel da Metta.
+- Compra pelo site: `node e2e/purchase.mjs --base http://127.0.0.1:5173 [--mobile] [--shots <pasta>]`
+  clica em "Comprar este plano" em `/planos`, cria a conta e chega à confirmação com o preço do
+  catálogo, abre a identidade visual já conectado, confere que o login mantém o destino da compra e
+  que o catálogo do painel mostra o que está à venda. O pagamento em si acontece no Mercado Pago e
+  não é conduzido pelo script: sem `MP_ACCESS_TOKEN`, a página precisa dizer que o pagamento online
+  está indisponível; com ele, precisa estar pronta para levar ao Mercado Pago.
 - Contratos com uma AssinaVelox real (local ou homologação):
   `node e2e/contracts.mjs --base http://127.0.0.1:5173 --av-log <laravel.log da AssinaVelox> [--mobile] [--shots <pasta>]`.
   A API precisa apontar para essa instância (`ASSINAVELOX_API_URL`, `ASSINAVELOX_TOKEN`), que deve

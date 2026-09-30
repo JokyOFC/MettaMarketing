@@ -255,7 +255,7 @@ export function PlansPage() {
                   <li key={item}>{item}</li>
                 ))}
               </ul>
-              <PurchaseButton />
+              <PurchaseButton slug={p.slug} planName={p.name} />
             </article>
           ))}
         </div>

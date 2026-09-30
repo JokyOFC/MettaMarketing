@@ -2444,11 +2444,6 @@ td small {
   gap: 16px;
   white-space: nowrap;
 }
-.purchase-notice {
-  font-size: 11px !important;
-  line-height: 1.6;
-  margin: 10px 0 0;
-}
 .full-plans > .identity-banner {
   margin-bottom: 35px;
 }

@@ -1,9 +1,10 @@
 // Commerce (docs/API.md "Comercial"): services catalog, orders,
-// subscriptions, payments, finance summary and the client billing portal.
-// Staff access is capability-gated (finance/admin); clients only reach their
-// own non-draft orders through /api/portal/*. Mercado Pago lives in
-// services/mercadopago.js.
+// subscriptions, payments, finance summary, the client billing portal and
+// the purchases started on the site. Staff access is capability-gated
+// (finance/admin); clients only reach their own non-draft orders through
+// /api/portal/*. Mercado Pago lives in services/mercadopago.js.
 import { Router } from "express";
+import { siteOffers } from "../../src/data/brand.js";
 import { assertClient, scopeSql } from "../lib/access.js";
 import { ACTIVITY_SELECT, logActivity } from "../lib/audit.js";
 import { requireAuth, requireCap } from "../lib/auth.js";
@@ -12,8 +13,8 @@ import { newId } from "../lib/ids.js";
 import { clientUserIds, notify } from "../lib/notify.js";
 import { bool, isStaff, parseJson, userRef } from "../lib/serialize.js";
 import { now } from "../lib/time.js";
-import { paginate, parse, schemas, z } from "../lib/validate.js";
-import { contractGate, serializeContract } from "../services/contracts.js";
+import { documentProblem, paginate, parse, schemas, z } from "../lib/validate.js";
+import { contractGate, contractsReady, serializeContract } from "../services/contracts.js";
 import * as mp from "../services/mercadopago.js";
 
 // ------------------------------------------------------------------ dates (Brasília, UTC-3)
@@ -42,6 +43,11 @@ const money = (field = "o valor") =>
 
 const itemsSchema = z.array(z.string().trim().min(1, "Item vazio.").max(160, "Use no máximo 160 caracteres.")).max(30, "Use no máximo 30 itens.");
 
+// "Comprar" button of the site (src/data/brand.js) that sells this service.
+const slugSchema = z
+  .union([z.enum(siteOffers.map((offer) => offer.slug), { error: "Escolha um dos botões de compra do site." }), z.null()])
+  .optional();
+
 const serviceCreateSchema = z.object({
   name: schemas.text(120),
   kind: z.enum(["subscription", "one_off"], { error: "Escolha assinatura mensal ou avulso." }),
@@ -50,6 +56,7 @@ const serviceCreateSchema = z.object({
   items: itemsSchema.optional(),
   includesEditables: z.boolean().optional(),
   active: z.boolean().optional(),
+  slug: slugSchema,
 });
 
 const servicePatchSchema = z.object({
@@ -61,6 +68,13 @@ const servicePatchSchema = z.object({
   includesEditables: z.boolean().optional(),
   active: z.boolean().optional(),
   sortOrder: z.number().int().min(0).max(1_000_000).optional(),
+  slug: slugSchema,
+});
+
+const purchaseSchema = z.object({
+  offer: z.string().trim().min(1, "Escolha o que contratar.").max(64),
+  payerEmail: schemas.email.optional(),
+  document: schemas.optionalText(40),
 });
 
 const optionalId = z.union([schemas.id, z.null()]).optional();
@@ -126,6 +140,7 @@ const PAYMENT_SELECT = `SELECT p.*, o.description AS order_description, sv.name 
 function serializeService(row, usage) {
   const service = {
     id: row.id,
+    slug: row.slug ?? null,
     name: row.name,
     kind: row.kind,
     priceCents: row.price_cents,
@@ -142,23 +157,41 @@ function serializeService(row, usage) {
   return service;
 }
 
+// A catalog item as the confirmation page of a site purchase shows it.
+function serializeOffer(row) {
+  return {
+    slug: row.slug,
+    name: row.name,
+    kind: row.kind,
+    priceCents: row.price_cents,
+    description: row.description ?? null,
+    items: parseJson(row.items, []),
+  };
+}
+
 const creator = (row) => (row.creator_id ? userRef({ id: row.creator_id, name: row.creator_name, role: row.creator_role }) : null);
 
 // Contract summary + payment gate (services/contracts.js). Clients only see
-// contracts that were sent to them.
+// contracts that were sent to them. Site purchases get the contract after
+// the payment (contractAfterPayment), so it never holds their payment.
 async function contractInfo(req, { orderId = null, subscriptionId = null, row }) {
-  const gate = await contractGate(req.ctx, { orderId, subscriptionId, waived: Boolean(row.contract_waived_at) });
+  const afterPayment = bool(row.contract_after_payment);
+  const gate = await contractGate(req.ctx, { orderId, subscriptionId, waived: Boolean(row.contract_waived_at), afterPayment });
   const visible =
     gate.contract && (isStaff(req) || !["draft", "sending", "failed"].includes(gate.contract.status));
   const info = {
     contract: visible ? serializeContract(req, gate.contract) : null,
     contractRequired: gate.required,
     contractSatisfied: gate.satisfied,
+    contractAfterPayment: afterPayment,
   };
-  if (isStaff(req))
+  if (isStaff(req)) {
     info.contractWaiver = row.contract_waived_at
       ? { at: row.contract_waived_at, reason: row.contract_waiver_reason ?? null }
       : null;
+    // When the automatic contract step of a site purchase ran (sent, or the team was told why not).
+    info.contractAutoAt = row.contract_auto_at ?? null;
+  }
   return info;
 }
 
@@ -458,20 +491,34 @@ export default function commerceRoutes(ctx) {
     res.json({ items: rows.map((row) => serializeService(row, usage(row.id))), total: rows.length });
   });
 
+  // A "Comprar" button of the site sells one service, of the matching kind.
+  async function checkSlug(slug, kind, serviceId = null) {
+    const offer = slug ? siteOffers.find((item) => item.slug === slug) : null;
+    if (!offer) return; // none, or a button the site no longer has
+    if (offer.kind !== kind)
+      throw validation({
+        slug: offer.kind === "subscription" ? `O botão “${offer.name}” vende um plano mensal.` : `O botão “${offer.name}” vende um serviço avulso.`,
+      });
+    const other = await db.get("SELECT name FROM services WHERE slug = ? AND id <> ?", [slug, serviceId ?? ""]);
+    if (other) throw validation({ slug: `O botão “${offer.name}” já está ligado ao serviço ${other.name}. Desligue-o lá primeiro.` });
+  }
+
   router.post("/api/services", requireAuth, requireCap("services.manage"), async (req, res) => {
     const input = parse(serviceCreateSchema, req.body);
     if (input.kind === "subscription" && input.priceCents <= 0)
       throw validation({ priceCents: "Assinaturas precisam de um valor mensal maior que zero." });
+    await checkSlug(input.slug, input.kind);
     const id = newId("svc");
     const at = now();
     await db.tx(async () => {
       const max = (await db.get("SELECT COALESCE(MAX(sort_order), 0) AS n FROM services")).n;
       await db.run(
-        `INSERT INTO services (id, name, kind, price_cents, billing_interval, description, items, includes_editables,
+        `INSERT INTO services (id, slug, name, kind, price_cents, billing_interval, description, items, includes_editables,
            active, sort_order, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
+          input.slug ?? null,
           input.name,
           input.kind,
           input.priceCents,
@@ -522,6 +569,7 @@ export default function commerceRoutes(ctx) {
     const price = input.priceCents ?? row.price_cents;
     if (kind === "subscription" && price <= 0)
       throw validation({ priceCents: "Assinaturas precisam de um valor mensal maior que zero." });
+    await checkSlug(input.slug !== undefined ? input.slug : row.slug, kind, row.id);
 
     const sets = [];
     const params = [];
@@ -540,6 +588,7 @@ export default function commerceRoutes(ctx) {
     if (input.includesEditables !== undefined) put("includes_editables", input.includesEditables ? 1 : 0);
     if (input.active !== undefined) put("active", input.active ? 1 : 0);
     if (input.sortOrder !== undefined) put("sort_order", input.sortOrder);
+    if (input.slug !== undefined) put("slug", input.slug);
     if (sets.length) {
       put("updated_at", now());
       await db.tx(async () => {
@@ -548,6 +597,10 @@ export default function commerceRoutes(ctx) {
         if (input.active !== undefined && bool(row.active) !== input.active) changes.push(input.active ? "ativado" : "desativado");
         if (input.priceCents !== undefined && input.priceCents !== row.price_cents)
           changes.push(`preço ${mp.formatBRL(row.price_cents)} → ${mp.formatBRL(input.priceCents)}`);
+        if (input.slug !== undefined && (input.slug ?? null) !== (row.slug ?? null)) {
+          const offer = siteOffers.find((item) => item.slug === input.slug);
+          changes.push(offer ? `ligado ao botão “${offer.name}” do site` : "desligado do botão de compra do site");
+        }
         await logActivity(req, {
           action: "service.updated",
           entityType: "service",
@@ -1089,6 +1142,8 @@ export default function commerceRoutes(ctx) {
       subscriptions: await Promise.all(subscriptions.map((row) => serializeSubscription(req, row))),
       payments: payments.map((row) => serializePayment(req, row)),
       paymentsEnabled: mp.mpStatus(ctx.config).configured,
+      // Site purchases get their contract here after the payment.
+      contractsEnabled: await contractsReady(ctx),
     });
   });
 
@@ -1098,7 +1153,11 @@ export default function commerceRoutes(ctx) {
     if (row.status === "paid") throw conflict("Esta cobrança já está paga.");
     if (!OPEN.has(row.status))
       throw conflict("Esta cobrança foi encerrada pela Metta. Fale com a equipe se precisar de uma nova.");
-    const gate = await contractGate(ctx, { orderId: row.id, waived: Boolean(row.contract_waived_at) });
+    const gate = await contractGate(ctx, {
+      orderId: row.id,
+      waived: Boolean(row.contract_waived_at),
+      afterPayment: bool(row.contract_after_payment),
+    });
     if (!gate.satisfied)
       throw conflict(
         gate.contract?.status === "sent"
@@ -1124,6 +1183,260 @@ export default function commerceRoutes(ctx) {
       summary: `${req.user.name} abriu o pagamento no Mercado Pago`,
     });
     res.json({ checkoutUrl: result.url, order: await serializeOrder(req, await getOrderRow(row.id)) });
+  });
+
+  // --------------------------------------------------------------- purchases from the site
+
+  // The "Comprar" buttons of /planos lead a signed-in client to
+  // /painel/contratar/:slug. The price is the catalog's. The client pays first
+  // (Checkout Pro for one-off services, a monthly authorization for plans);
+  // the contract follows the confirmed payment (services/contracts.js,
+  // sendContractAfterPayment).
+
+  async function activeOffer(slug) {
+    const service = await db.get("SELECT * FROM services WHERE slug = ? AND active = 1", [String(slug ?? "")]);
+    if (!service) throw notFound("Este item não está disponível para compra online. Fale com a Metta.");
+    return service;
+  }
+
+  // One plan at a time: a plan in force, or one the team already prepared,
+  // is handled in Financeiro or with the team.
+  async function purchaseBlock(clientId, service) {
+    if (service.kind !== "subscription") return null;
+    const current = await db.get(
+      `SELECT sb.service_id, sb.status, s.name AS service_name
+         FROM subscriptions sb JOIN services s ON s.id = sb.service_id
+        WHERE sb.client_id = ? AND (sb.status IN ('active', 'paused') OR (sb.status = 'pending' AND sb.contract_after_payment = 0))
+        ORDER BY CASE WHEN sb.status = 'pending' THEN 1 ELSE 0 END, sb.created_at DESC
+        LIMIT 1`,
+      [clientId],
+    );
+    if (!current) return null;
+    if (current.status === "pending")
+      return {
+        code: "plan_pending",
+        message: `A Metta já preparou a assinatura do plano ${current.service_name} para a sua empresa. Ela está em Financeiro.`,
+      };
+    return {
+      code: "plan_active",
+      message:
+        current.service_id === service.id
+          ? `Sua empresa já assina o plano ${current.service_name}.`
+          : `Sua empresa já assina o plano ${current.service_name}. Para trocar de plano, fale com a Metta.`,
+    };
+  }
+
+  // One purchase at a time per client (double clicks, two tabs).
+  const purchasing = new Map();
+  async function onePurchaseAtATime(clientId, fn) {
+    const run = (purchasing.get(clientId) ?? Promise.resolve()).catch(() => {}).then(fn);
+    purchasing.set(clientId, run);
+    try {
+      return await run;
+    } finally {
+      if (purchasing.get(clientId) === run) purchasing.delete(clientId);
+    }
+  }
+
+  // An open charge left at an old price: the client just saw the catalog's.
+  async function closeStaleOrder(req, row) {
+    await db.tx(async () => {
+      await db.run("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = ?", [now(), row.id, row.status]);
+      await logActivity(req, {
+        action: "order.cancelled",
+        entityType: "order",
+        entityId: row.id,
+        clientId: row.client_id,
+        brandId: row.brand_id,
+        summary: `Cobrança substituída por uma nova compra pelo site, com o preço atual: ${label(row)}`,
+      });
+    });
+    if (row.mp_preference_id) mp.expirePreference(req.ctx, row.mp_preference_id).catch(() => {});
+  }
+
+  // A plan chosen before and never authorized: its link stops working first,
+  // at Mercado Pago (never leave a live authorization link behind).
+  async function closeStalePlan(req, row) {
+    if (row.mp_preapproval_id) {
+      try {
+        await mp.cancelPreapproval(req.ctx, row.mp_preapproval_id);
+      } catch (err) {
+        const current = await mp.getPreapproval(req.ctx, row.mp_preapproval_id).catch(() => null);
+        if (current?.status !== "cancelled") throw err;
+      }
+    }
+    await db.tx(async () => {
+      const at = now();
+      await db.run(
+        "UPDATE subscriptions SET status = 'cancelled', cancelled_at = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'failed')",
+        [at, at, row.id],
+      );
+      await logActivity(req, {
+        action: "subscription.cancelled",
+        entityType: "subscription",
+        entityId: row.id,
+        clientId: row.client_id,
+        summary: "Assinatura não autorizada substituída por outra escolha de plano pelo site",
+      });
+    });
+  }
+
+  async function purchaseOneOff(req, client, service) {
+    // "Comprar" again reuses the open order of this service.
+    const open = await db.all(
+      `SELECT * FROM orders WHERE client_id = ? AND service_id = ? AND contract_after_payment = 1
+          AND status IN ('draft', 'pending_payment', 'failed')
+        ORDER BY created_at DESC`,
+      [client.id, service.id],
+    );
+    let row = open.find((order) => order.amount_cents === service.price_cents) ?? null;
+    for (const stale of open.filter((order) => order !== row)) await closeStaleOrder(req, stale);
+    let created = false;
+    if (!row) {
+      const id = newId("ord");
+      const at = now();
+      const brand = await db.get("SELECT id FROM brands WHERE client_id = ? AND status = 'active' ORDER BY created_at LIMIT 1", [client.id]);
+      await db.run(
+        `INSERT INTO orders (id, client_id, brand_id, service_id, description, amount_cents, status, due_date,
+           external_reference, contract_after_payment, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'draft', NULL, ?, 1, ?, ?, ?)`,
+        [id, client.id, brand?.id ?? null, service.id, service.name, service.price_cents, `metta-${id}`, req.user.id, at, at],
+      );
+      row = await db.get("SELECT * FROM orders WHERE id = ?", [id]);
+      created = true;
+    }
+    let checkout;
+    try {
+      checkout = await ensureOrderCheckout(req, row);
+    } catch (err) {
+      // Nothing reached the client: the draft this click created goes away.
+      if (created) await db.run("DELETE FROM orders WHERE id = ? AND status = 'draft'", [row.id]);
+      throw err;
+    }
+    if (created)
+      await logActivity(req, {
+        action: "order.purchased",
+        entityType: "order",
+        entityId: row.id,
+        clientId: client.id,
+        brandId: row.brand_id,
+        summary: `${req.user.name} iniciou pelo site a compra de ${service.name} (${mp.formatBRL(service.price_cents)})`,
+        visibility: "client",
+      });
+    return { created, url: checkout.url, body: { order: await serializeOrder(req, await getOrderRow(row.id)) } };
+  }
+
+  async function purchasePlan(req, client, service, payerEmail) {
+    const open = await db.all(
+      `SELECT * FROM subscriptions WHERE client_id = ? AND contract_after_payment = 1 AND status IN ('pending', 'failed')
+        ORDER BY created_at DESC`,
+      [client.id],
+    );
+    let row = open.find((sub) => sub.service_id === service.id && sub.amount_cents === service.price_cents) ?? null;
+    for (const stale of open.filter((sub) => sub !== row)) await closeStalePlan(req, stale);
+    let created = false;
+    let regenerate = false;
+    if (row && row.payer_email !== payerEmail) {
+      // The authorization is tied to the payer's e-mail: a new link for the new one.
+      await db.run("UPDATE subscriptions SET payer_email = ?, updated_at = ? WHERE id = ?", [payerEmail, now(), row.id]);
+      row = { ...row, payer_email: payerEmail };
+      regenerate = Boolean(row.checkout_url);
+    }
+    if (!row) {
+      const id = newId("sub");
+      const at = now();
+      await db.run(
+        `INSERT INTO subscriptions (id, client_id, service_id, amount_cents, status, payer_email, external_reference,
+           contract_after_payment, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'pending', ?, ?, 1, ?, ?, ?)`,
+        [id, client.id, service.id, service.price_cents, payerEmail, `metta-${id}`, req.user.id, at, at],
+      );
+      row = await db.get("SELECT * FROM subscriptions WHERE id = ?", [id]);
+      created = true;
+    }
+    let checkout;
+    try {
+      checkout = await ensureSubscriptionCheckout(req, row, { regenerate });
+    } catch (err) {
+      if (created) await db.run("DELETE FROM subscriptions WHERE id = ? AND status = 'pending' AND mp_preapproval_id IS NULL", [row.id]);
+      throw err;
+    }
+    if (created)
+      await logActivity(req, {
+        action: "subscription.purchased",
+        entityType: "subscription",
+        entityId: row.id,
+        clientId: client.id,
+        summary: `${req.user.name} escolheu pelo site o plano ${service.name} (${mp.formatBRL(service.price_cents)}/mês)`,
+        visibility: "client",
+      });
+    return {
+      created,
+      url: checkout.url,
+      body: { subscription: await serializeSubscription(req, await getSubscriptionRow(row.id)) },
+    };
+  }
+
+  // What the confirmation page shows before the client goes to Mercado Pago.
+  router.get("/api/portal/offers/:slug", requireAuth, requireCap("portal.access"), async (req, res) => {
+    const service = await activeOffer(req.params.slug);
+    const client = await db.get("SELECT document FROM clients WHERE id = ?", [req.user.client_id]);
+    res.json({
+      offer: serializeOffer(service),
+      paymentsEnabled: mp.mpStatus(ctx.config).configured,
+      contractAfterPayment: await contractsReady(ctx),
+      needsDocument: !client?.document,
+      payerEmail: req.user.email,
+      blocked: await purchaseBlock(req.user.client_id, service),
+    });
+  });
+
+  // Starts (or resumes) the purchase and answers the Mercado Pago link.
+  router.post("/api/portal/purchases", requireAuth, requireCap("portal.access"), async (req, res) => {
+    const input = parse(purchaseSchema, req.body);
+    const clientId = req.user.client_id;
+    const result = await onePurchaseAtATime(clientId, async () => {
+      const service = await activeOffer(input.offer);
+      const client = await db.get("SELECT * FROM clients WHERE id = ?", [clientId]);
+      if (!client || client.status === "archived") throw conflict("O acesso da sua empresa está arquivado. Fale com a Metta.");
+      const block = await purchaseBlock(clientId, service);
+      if (block) throw conflict(block.message, block.code);
+      // The contract names the client: the CPF or CNPJ is asked once, when missing.
+      if (!client.document) {
+        const problem = input.document ? documentProblem(input.document) : "Informe o CNPJ ou o CPF que vai no contrato.";
+        if (problem) throw validation({ document: problem });
+      }
+      if (!mp.mpStatus(ctx.config).configured) throw notConfigured(mp.MESSAGES.clientNotConfigured);
+      if (!client.document) {
+        await db.tx(async () => {
+          await db.run("UPDATE clients SET document = ?, updated_at = ? WHERE id = ? AND (document IS NULL OR document = '')", [
+            input.document,
+            now(),
+            clientId,
+          ]);
+          await logActivity(req, {
+            action: "client.document_added",
+            entityType: "client",
+            entityId: clientId,
+            clientId,
+            summary: `${req.user.name} informou o CNPJ/CPF da empresa na compra pelo site`,
+          });
+        });
+      }
+      try {
+        return service.kind === "subscription"
+          ? await purchasePlan(req, client, service, input.payerEmail ?? String(req.user.email).toLowerCase())
+          : await purchaseOneOff(req, client, service);
+      } catch (err) {
+        if (err?.code === "integration_not_configured") throw notConfigured(mp.MESSAGES.clientNotConfigured);
+        // Validation answers from Mercado Pago (e.g. the payer's e-mail) help the client; the rest is "try again".
+        const refused = err?.mpStatus >= 400 && err.mpStatus < 500 && ![401, 403, 429].includes(err.mpStatus);
+        if (err?.code === "upstream_error" && !refused)
+          throw upstream("Não foi possível abrir o pagamento no Mercado Pago agora. Tente de novo em instantes.");
+        throw err;
+      }
+    });
+    res.status(result.created ? 201 : 200).json({ checkoutUrl: result.url, ...result.body });
   });
 
   return router;

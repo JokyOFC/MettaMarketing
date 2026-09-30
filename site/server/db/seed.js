@@ -1,6 +1,7 @@
 // Idempotent base data: system categories, services catalog (only when the
-// table is empty) and default settings.
-import { contactEmail, plans } from "../../src/data/brand.js";
+// table is empty, linked to the site's "Comprar" buttons by slug) and default
+// settings.
+import { contactEmail, identityOffer, plans } from "../../src/data/brand.js";
 import { newId } from "../lib/ids.js";
 import { now } from "../lib/time.js";
 
@@ -35,17 +36,17 @@ export async function seed(db) {
     if (services === 0) {
       for (const [index, plan] of plans.entries()) {
         await db.run(
-          `INSERT INTO services (id, name, kind, price_cents, billing_interval, description, items,
+          `INSERT INTO services (id, slug, name, kind, price_cents, billing_interval, description, items,
              includes_editables, active, sort_order, created_at, updated_at)
-           VALUES (?, ?, 'subscription', ?, 'monthly', ?, ?, 0, 1, ?, ?, ?)`,
-          [newId("svc"), plan.name, priceCents(plan.price), plan.description, JSON.stringify(plan.items), (index + 1) * 10, at, at],
+           VALUES (?, ?, ?, 'subscription', ?, 'monthly', ?, ?, 0, 1, ?, ?, ?)`,
+          [newId("svc"), plan.slug, plan.name, priceCents(plan.price), plan.description, JSON.stringify(plan.items), (index + 1) * 10, at, at],
         );
       }
       await db.run(
-        `INSERT INTO services (id, name, kind, price_cents, billing_interval, description, items,
+        `INSERT INTO services (id, slug, name, kind, price_cents, billing_interval, description, items,
            includes_editables, active, sort_order, created_at, updated_at)
-         VALUES (?, 'Identidade visual', 'one_off', 200000, NULL, NULL, '[]', 0, 1, ?, ?, ?)`,
-        [newId("svc"), (plans.length + 1) * 10, at, at],
+         VALUES (?, ?, ?, 'one_off', ?, NULL, NULL, '[]', 0, 1, ?, ?, ?)`,
+        [newId("svc"), identityOffer.slug, identityOffer.name, priceCents(identityOffer.price), (plans.length + 1) * 10, at, at],
       );
     }
 

@@ -28,3 +28,15 @@ export function loginPath(location) {
   const next = `${location.pathname}${location.search || ""}`;
   return `/login?next=${encodeURIComponent(next)}`;
 }
+
+// Online purchase started by a "Comprar" button of the site.
+const PURCHASE_PATH = /^\/painel\/contratar\/([a-z0-9-]{1,64})\/?$/;
+export const purchaseSlug = (path) => (typeof path === "string" ? (path.match(PURCHASE_PATH)?.[1] ?? null) : null);
+
+// Visitors who come to buy usually have no account yet: they start at /cadastro.
+export function signupPath(location) {
+  return `/cadastro?next=${encodeURIComponent(`${location.pathname}${location.search || ""}`)}`;
+}
+
+// Keeps the destination when switching between /login and /cadastro.
+export const withNext = (path, next) => (next ? `${path}?next=${encodeURIComponent(next)}` : path);

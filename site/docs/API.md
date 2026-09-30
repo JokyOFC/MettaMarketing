@@ -473,3 +473,24 @@ Pedidos e assinaturas ganham `contract` (resumo acima; clientes só veem depois 
 | POST | `/api/portal/orders/:id/pay` | 409 `contract_required` enquanto o contrato não estiver concluído (quando exigido) |
 
 `/api/portal/overview` ganha `contracts.awaitingSignature`.
+
+## Compra pelo site (pagar primeiro, contrato depois)
+
+Botões "Comprar" de `/planos` → `/painel/contratar/:slug`. Regras em `docs/PLATFORM.md` §6.2.
+`slug` é um dos botões do site (`siteOffers` em `src/data/brand.js`: `presenca`, `gestao`,
+`estrategia`, `identidade-visual`), ligado a um serviço por `services.slug`.
+
+| Método | Caminho | Notas |
+| ------ | ------- | ----- |
+| GET | `/api/portal/offers/:slug` | cliente → `{offer:{slug,name,kind,priceCents,description,items}, paymentsEnabled, contractAfterPayment /* o contrato sai sozinho depois do pagamento */, needsDocument /* empresa sem CPF/CNPJ */, payerEmail, blocked: null|{code:'plan_active'|'plan_pending', message}}`; 404 se o botão não estiver ligado a um serviço ativo |
+| POST | `/api/portal/purchases` | cliente `{offer: slug, payerEmail? /* planos; padrão: e-mail de quem compra */, document? /* obrigatório se needsDocument */}` → 201 (criou) ou 200 (retomou) `{checkoutUrl, order|subscription}`. Avulso: pedido + Checkout Pro; plano: assinatura + `/preapproval`. 409 `plan_active`/`plan_pending`; 422 `document`/`payerEmail`; 503 sem Mercado Pago; 502 com a mensagem do Mercado Pago quando ele recusa os dados, genérica nas demais falhas (nada fica criado) |
+
+- Serviços: `slug` (string|null) em `GET/POST /api/services` e `PATCH /api/services/:id`; 422 em
+  `slug` quando o botão é de outro tipo (plano × avulso) ou já está ligado a outro serviço.
+- Pedidos e assinaturas: `contractAfterPayment` (compra pelo site) e, para a equipe,
+  `contractAutoAt` (quando o envio automático do contrato rodou). Nessas compras
+  `contractRequired` é sempre `false`: o contrato nunca segura o pagamento.
+- `GET /api/portal/billing` ganha `contractsEnabled` (o contrato de uma compra pelo site sai
+  sozinho depois do pagamento).
+- `POST /api/contracts` aceita pedido **pago** quando ele veio do site; 409 `contract_exists`
+  quando já há contrato em andamento ou concluído para o item.

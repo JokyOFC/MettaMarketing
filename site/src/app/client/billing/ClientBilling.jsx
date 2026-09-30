@@ -65,7 +65,10 @@ const orderIdFromReference = (reference) => (reference?.startsWith("metta-ord_")
 // The contract waits for the client's signature (not for Metta's).
 const awaitsClient = (contract) => contract?.status === "sent" && contract.signers?.some((s) => s.role === "client" && s.turn);
 
-function ReturnBanner({ kind, order, subscription, polling, onRefresh, onDismiss, refreshing }) {
+// Site purchases are paid first; their contract follows in the Contratos section.
+const CONTRACT_NEXT = " O contrato chega em instantes na seção Contratos desta página, para você assinar.";
+
+function ReturnBanner({ kind, order, subscription, polling, contractsEnabled, onRefresh, onDismiss, refreshing }) {
   // The server is the only source of truth: "paid" only when it says so.
   if (order?.status === "paid")
     return (
@@ -82,12 +85,14 @@ function ReturnBanner({ kind, order, subscription, polling, onRefresh, onDismiss
         }
       >
         O Mercado Pago confirmou o pagamento de {order.description}. Obrigado!
+        {contractsEnabled && order.contractAfterPayment && !order.contract ? CONTRACT_NEXT : ""}
       </Callout>
     );
   if (kind === "assinatura" && subscription?.status === "active")
     return (
       <Callout live tone="olive" icon={BadgeCheck} title="Assinatura ativa" className="fin-return is-confirmed" actions={<Button size="sm" variant="ghost" onClick={onDismiss}>Fechar</Button>}>
         O Mercado Pago confirmou a autorização de {subscription.service.name}. As cobranças mensais acontecem automaticamente.
+        {contractsEnabled && subscription.contractAfterPayment && !subscription.contract ? CONTRACT_NEXT : ""}
       </Callout>
     );
   const refresh = (
@@ -300,6 +305,7 @@ export default function ClientBilling() {
   const [paying, setPaying] = useState(null);
   const [payErrors, setPayErrors] = useState({});
   const [polls, setPolls] = useState(0);
+  const [contractPolls, setContractPolls] = useState(0);
   const pollTimer = useRef(0);
 
   const retorno = RETURNS.has(params.get("retorno")) ? params.get("retorno") : null;
@@ -327,6 +333,28 @@ export default function ClientBilling() {
     }, POLL_MS);
     return () => window.clearTimeout(pollTimer.current);
   }, [polling, polls, reload]);
+
+  // A site purchase just confirmed: its contract is on the way; show it as soon as it is sent.
+  const returnedItem = retorno === "assinatura" ? pendingSubscription : returnedOrder;
+  const reloadContracts = contracts.reload;
+  const awaitingContract = Boolean(
+    settled &&
+      data?.contractsEnabled &&
+      returnedItem?.contractAfterPayment &&
+      !contracts.data?.items?.some((c) => c.orderId === returnedItem.id || c.subscriptionId === returnedItem.id) &&
+      contractPolls < POLL_LIMIT,
+  );
+  useEffect(() => {
+    if (!awaitingContract) return undefined;
+    const timer = window.setTimeout(() => {
+      if (document.visibilityState === "visible") {
+        reloadContracts().catch(() => {});
+        reload().catch(() => {});
+      }
+      setContractPolls((n) => n + 1);
+    }, POLL_MS);
+    return () => window.clearTimeout(timer);
+  }, [awaitingContract, contractPolls, reloadContracts, reload]);
 
   const dismiss = () => {
     setParams(
@@ -391,6 +419,7 @@ export default function ClientBilling() {
           order={returnedOrder}
           subscription={pendingSubscription}
           polling={polling}
+          contractsEnabled={Boolean(data.contractsEnabled)}
           refreshing={refreshing}
           onRefresh={() => reload().catch(() => {})}
           onDismiss={dismiss}
@@ -468,6 +497,11 @@ export default function ClientBilling() {
                 icon={Repeat}
                 title="Nenhuma assinatura"
                 description="Planos mensais contratados com a Metta aparecem aqui, com o status da cobrança recorrente no Mercado Pago."
+                action={
+                  <Button size="sm" variant="secondary" to="/planos">
+                    Conhecer os planos
+                  </Button>
+                }
               />
             )}
           </section>

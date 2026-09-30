@@ -47,6 +47,7 @@ export const productRoutes = (
       <Route path="briefings" element={<P.ClientBriefings />} />
       <Route path="briefings/:id" element={<P.BriefingForm />} />
       <Route path="financeiro" element={<P.ClientBilling />} />
+      <Route path="contratar/:slug" element={<P.Purchase />} />
       <Route path="notificacoes" element={<P.ClientNotifications />} />
       <Route path="historico" element={<P.ClientHistory />} />
       <Route path="conta" element={<P.Account />} />

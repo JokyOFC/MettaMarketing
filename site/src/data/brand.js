@@ -3,6 +3,7 @@ export const mailto = (subject) =>
   `mailto:${contactEmail}?subject=${encodeURIComponent(subject)}`;
 export const plans = [
   {
+    slug: "presenca",
     name: "Presença",
     price: "1.500",
     description:
@@ -17,6 +18,7 @@ export const plans = [
     ],
   },
   {
+    slug: "gestao",
     name: "Gestão",
     price: "3.000",
     description:
@@ -32,6 +34,7 @@ export const plans = [
     ],
   },
   {
+    slug: "estrategia",
     name: "Estratégia",
     price: "4.500",
     description:
@@ -47,6 +50,26 @@ export const plans = [
     ],
   },
 ];
+// Brand identity, sold on its own (banner of /planos).
+export const identityOffer = {
+  slug: "identidade-visual",
+  name: "Identidade visual",
+  price: "2.000",
+};
+// What the "Comprar" buttons of the site sell. The slug links each button to
+// a service of the catalog (services.slug); the price charged is the one in
+// the catalog, shown again before payment.
+export const siteOffers = [
+  ...plans.map((plan) => ({
+    slug: plan.slug,
+    name: plan.name,
+    price: plan.price,
+    kind: "subscription",
+    phrase: `o plano ${plan.name}`,
+  })),
+  { ...identityOffer, kind: "one_off", phrase: "a identidade visual" },
+];
+export const purchasePath = (slug) => `/painel/contratar/${slug}`;
 export const steps = [
   {
     name: "Escutar",

@@ -26,10 +26,11 @@ function journeyFor(subscription) {
   const status = subscription.status;
   const authorized = ["active", "paused"].includes(status) || actions.has("subscription.active");
   return [
-    { label: "Criada", state: "done" },
+    { label: subscription.contractAfterPayment ? "Criada pelo site" : "Criada", state: "done" },
     { label: "Link gerado", state: linked ? "done" : status === "pending" ? "current" : "todo" },
     {
       label: "Autorizada",
+      key: "payment",
       state: authorized ? "done" : status === "pending" && linked ? "current" : status === "failed" ? "failed" : "todo",
     },
     status === "cancelled"
@@ -185,6 +186,8 @@ export default function SubscriptionDrawer({ subscriptionId, onClose, onChanged,
                 contractRequired: subscription.contractRequired,
                 contractSatisfied: subscription.contractSatisfied,
                 contractWaiver: subscription.contractWaiver,
+                contractAfterPayment: subscription.contractAfterPayment,
+                contractAutoAt: subscription.contractAutoAt,
               }}
               canManage={canManage}
               canConfigure={canConfigure}
@@ -291,7 +294,7 @@ export default function SubscriptionDrawer({ subscriptionId, onClose, onChanged,
                   },
                   {
                     label: "Criada",
-                    value: `${formatDate(subscription.createdAt)}${subscription.createdBy ? ` por ${subscription.createdBy.name}` : ""}`,
+                    value: `${formatDate(subscription.createdAt)}${subscription.createdBy ? ` por ${subscription.createdBy.name}` : ""}${subscription.contractAfterPayment ? ", pelo site" : ""}`,
                   },
                 ]}
               />

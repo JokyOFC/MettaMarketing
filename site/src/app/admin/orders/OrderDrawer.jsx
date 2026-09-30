@@ -39,11 +39,13 @@ function journeyFor(order) {
     cancelled: { label: "Cancelado", state: "stopped" },
   }[order.status] ?? { label: "Pago", state: linked ? "current" : "todo" };
   const closed = ["paid", "refunded", "cancelled", "failed"].includes(order.status);
+  // Bought on the site: the client opened the payment; nothing was sent.
+  const site = order.contractAfterPayment;
   return [
-    { label: "Criado", state: "done" },
+    { label: site ? "Pedido pelo site" : "Criado", state: "done" },
     { label: "Link gerado", state: linked ? "done" : closed ? "todo" : "current" },
-    { label: "Enviado", state: sent ? "done" : "todo" },
-    end,
+    ...(site ? [] : [{ label: "Enviado", state: sent ? "done" : "todo" }]),
+    { ...end, key: "payment" },
   ];
 }
 
@@ -269,6 +271,8 @@ export default function OrderDrawer({ orderId, onClose, onChanged, mp, canManage
                 contractRequired: order.contractRequired,
                 contractSatisfied: order.contractSatisfied,
                 contractWaiver: order.contractWaiver,
+                contractAfterPayment: order.contractAfterPayment,
+                contractAutoAt: order.contractAutoAt,
               }}
               canManage={canManage}
               canConfigure={canConfigure}
@@ -403,7 +407,7 @@ export default function OrderDrawer({ orderId, onClose, onChanged, mp, canManage
                     },
                     {
                       label: "Criado",
-                      value: `${formatDate(order.createdAt)}${order.createdBy ? ` por ${order.createdBy.name}` : ""}`,
+                      value: `${formatDate(order.createdAt)}${order.createdBy ? ` por ${order.createdBy.name}` : ""}${order.contractAfterPayment ? ", pelo site" : ""}`,
                     },
                   ]}
                 />

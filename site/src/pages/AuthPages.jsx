@@ -10,13 +10,19 @@ import {
 import { Check, Circle, MailCheck, MessageCircle, TimerOff } from "lucide-react";
 import Logo from "../Logo.jsx";
 import { Arrow } from "../components/SiteChrome.jsx";
-import { contactEmail, mailto, whatsappUrl } from "../data/brand.js";
+import { contactEmail, mailto, siteOffers, whatsappUrl } from "../data/brand.js";
 import { api, NETWORK_MESSAGE } from "../app/api/client.js";
 import { useAuth } from "../app/auth/AuthProvider.jsx";
-import { homeFor, safeNext } from "../app/auth/roles.js";
+import { homeFor, purchaseSlug, safeNext, withNext } from "../app/auth/roles.js";
 import "../app/auth/access.css";
 
 const MIN_PASSWORD = 10;
+
+// The item of the site a visitor came to buy (next = /painel/contratar/:slug).
+function purchaseOffer(next) {
+  const slug = purchaseSlug(next);
+  return slug ? (siteOffers.find((offer) => offer.slug === slug) ?? null) : null;
+}
 
 // Split-screen editorial frame shared by every access page.
 function AuthLayout({ kicker = "ÁREA DO CLIENTE", title, lead, children, footer }) {
@@ -194,6 +200,7 @@ export function LoginPage() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const expired = sessionLost || location.state?.reason === "expired";
+  const offer = purchaseOffer(next);
 
   if (user && !busy) return <Navigate to={safeNext(next, user)} replace />;
 
@@ -221,13 +228,18 @@ export function LoginPage() {
       lead="Entre para acompanhar a sua marca, os conteúdos e as entregas da Metta."
       footer={
         <p className="auth-switch">
-          Ainda não tem acesso? <Link to="/cadastro">Criar conta</Link>
+          Ainda não tem acesso? <Link to={withNext("/cadastro", next)}>Criar conta</Link>
         </p>
       }
     >
       {expired && !error && (
         <p className="acc-note" role="status">
           Sua sessão terminou. Entre de novo para continuar de onde parou.
+        </p>
+      )}
+      {offer && !expired && (
+        <p className="acc-note" role="note">
+          Entre para contratar {offer.phrase}. Em seguida você confere o pedido e paga pelo Mercado Pago.
         </p>
       )}
       <form className="metta-form" onSubmit={submit}>
@@ -286,6 +298,10 @@ const EMPTY_SIGNUP = {
 export function SignupPage() {
   const { user, setUser } = useAuth();
   const navigate = useNavigate();
+  const [params] = useSearchParams();
+  // Where to go after signing up: the purchase that brought the visitor here.
+  const next = params.get("next");
+  const offer = purchaseOffer(next);
   const ids = { hints: useId(), password: useId(), confirm: useId(), terms: useId() };
   const [open, setOpen] = useState(null);
   const [form, setForm] = useState(EMPTY_SIGNUP);
@@ -307,8 +323,8 @@ export function SignupPage() {
     return () => controller.abort();
   }, []);
 
-  if (user && !busy) return <Navigate to={homeFor(user)} replace />;
-  if (open === false) return <InviteOnlyPage />;
+  if (user && !busy) return <Navigate to={safeNext(next, user)} replace />;
+  if (open === false) return <InviteOnlyPage next={next} />;
 
   const bind = (key) => ({
     value: form[key],
@@ -346,7 +362,7 @@ export function SignupPage() {
       });
       setForm(EMPTY_SIGNUP);
       setUser(data.user);
-      navigate(homeFor(data.user), { replace: true });
+      navigate(safeNext(next, data.user), { replace: true });
       // stays busy while the client area opens
     } catch (failure) {
       setBusy(false);
@@ -369,10 +385,16 @@ export function SignupPage() {
       lead="Em poucos minutos a sua empresa tem um espaço para acompanhar a marca, os conteúdos e as entregas da Metta."
       footer={
         <p className="auth-switch">
-          Já tem acesso? <Link to="/login">Entrar</Link>
+          Já tem acesso? <Link to={withNext("/login", next)}>Entrar</Link>
         </p>
       }
     >
+      {offer && (
+        <p className="acc-note" role="note">
+          Para contratar {offer.phrase}, crie o acesso da sua empresa. Em seguida você confere o pedido e paga pelo Mercado
+          Pago.
+        </p>
+      )}
       {open === null ? (
         <div className="acc-skeleton" aria-busy="true" aria-label="Carregando cadastro">
           <span />
@@ -464,7 +486,9 @@ export function SignupPage() {
             Criar conta
           </SubmitButton>
           <p className="form-note">
-            Ao criar a conta você já entra na área do cliente. A equipe da Metta é avisada e configura a sua marca.
+            {offer
+              ? "Ao criar a conta você já entra na área do cliente, onde confirma o pedido antes de pagar."
+              : "Ao criar a conta você já entra na área do cliente. A equipe da Metta é avisada e configura a sua marca."}
           </p>
         </form>
       )}
@@ -474,7 +498,7 @@ export function SignupPage() {
 
 // -------------------------------------------------------- invitation only
 
-export function InviteOnlyPage() {
+export function InviteOnlyPage({ next = null }) {
   return (
     <AuthLayout
       title={
@@ -485,7 +509,7 @@ export function InviteOnlyPage() {
       lead="A área do cliente é criada pela equipe da Metta para cada empresa que atendemos."
       footer={
         <p className="auth-switch">
-          Já tem acesso? <Link to="/login">Entrar</Link>
+          Já tem acesso? <Link to={withNext("/login", next)}>Entrar</Link>
         </p>
       }
     >

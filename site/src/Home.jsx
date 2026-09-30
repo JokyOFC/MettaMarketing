@@ -401,6 +401,7 @@ export default function Home() {
           <div className="plan-grid">
             {plans
               .map((p) => ({
+                slug: p.slug,
                 title: p.name,
                 value: p.price,
                 desc: p.description,
@@ -429,7 +430,7 @@ export default function Home() {
                       <li key={item}>{item}</li>
                     ))}
                   </ul>
-                  <PurchaseButton />
+                  <PurchaseButton slug={plan.slug} planName={plan.title} />
                 </article>
               ))}
           </div>

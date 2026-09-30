@@ -7,6 +7,9 @@ export {
   homeFor,
   isStaff,
   loginPath,
+  purchaseSlug,
   roleLabel,
   safeNext,
+  signupPath,
+  withNext,
 } from "./roles.js";

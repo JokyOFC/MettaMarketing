@@ -9,6 +9,7 @@ import { newId } from "../lib/ids.js";
 import { notConfigured, upstream } from "../lib/errors.js";
 import { clientUserIds, notify } from "../lib/notify.js";
 import { now } from "../lib/time.js";
+import { contractsReady } from "./contracts.js";
 
 export const MESSAGES = {
   notConfigured: "Mercado Pago não configurado. Defina as credenciais no servidor para gerar cobranças.",
@@ -402,6 +403,8 @@ export async function resolveReference(db, { externalReference, preapprovalId })
 export class ReconcileError extends Error {}
 
 const clientLink = "/painel/financeiro";
+// Appended to the client's confirmation when a site purchase gets its contract next.
+const CONTRACT_NEXT = " Em instantes o contrato chega para você assinar na área Financeiro, na seção Contratos.";
 const orderLink = (id) => `/admin/pedidos?pedido=${id}`;
 const subscriptionLink = (id) => `/admin/pedidos?aba=assinaturas&assinatura=${id}`;
 
@@ -511,6 +514,10 @@ async function applyToOrder(ctx, order, { status, detail, amount, paidAt, status
       at,
       order.id,
     ]);
+    // Bought on the site: the contract comes now, after the payment (after the commit).
+    const fromSite = Boolean(order.contract_after_payment);
+    if (fromSite) ctx.jobs?.enqueue("contracts.after_payment", { orderId: order.id });
+    const contractNext = fromSite && (await contractsReady(ctx));
     await logActivity(ctx, {
       ...base,
       action: "payment.approved",
@@ -521,7 +528,9 @@ async function applyToOrder(ctx, order, { status, detail, amount, paidAt, status
     await notify(ctx, await clientUserIds(db, order.client_id), {
       type: "payment.approved",
       title: "Pagamento confirmado",
-      body: `Recebemos o pagamento de ${formatBRL(amount ?? order.amount_cents)} referente a ${order.description}. Obrigado!`,
+      body: `Recebemos o pagamento de ${formatBRL(amount ?? order.amount_cents)} referente a ${order.description}. Obrigado!${
+        contractNext ? CONTRACT_NEXT : ""
+      }`,
       link: clientLink,
       entityType: "order",
       entityId: order.id,
@@ -534,8 +543,10 @@ async function applyToOrder(ctx, order, { status, detail, amount, paidAt, status
     });
     await notify(ctx, await financeTeamIds(db), {
       type: "payment.approved",
-      title: staffTitle("Pagamento aprovado"),
-      body: label,
+      title: staffTitle(fromSite ? "Nova compra pelo site" : "Pagamento aprovado"),
+      body: fromSite
+        ? `Pagamento confirmado pelo site: ${label}.${contractNext ? " O contrato segue automaticamente para o cliente assinar." : ""}`
+        : label,
       link: orderLink(order.id),
       entityType: "order",
       entityId: order.id,
@@ -712,11 +723,14 @@ export async function applyPreapproval(ctx, preapproval) {
     const client = await db.get("SELECT name FROM clients WHERE id = ?", [subscription.client_id]);
     const name = service?.name ?? "Assinatura";
     const base = { entityType: "subscription", entityId: subscription.id, clientId: subscription.client_id };
+    // Bought on the site: the contract comes once the plan is authorized.
+    const fromSite = Boolean(subscription.contract_after_payment);
     if (next === "active") {
       await db.run(
         `UPDATE subscriptions SET status = 'active', started_at = COALESCE(started_at, ?), failure_reason = NULL, updated_at = ? WHERE id = ?`,
         [toIso(preapproval.date_created) ?? at, at, subscription.id],
       );
+      if (fromSite) ctx.jobs?.enqueue("contracts.after_payment", { subscriptionId: subscription.id });
     } else if (next === "cancelled") {
       await db.run("UPDATE subscriptions SET status = 'cancelled', cancelled_at = COALESCE(cancelled_at, ?), updated_at = ? WHERE id = ?", [
         at,
@@ -739,10 +753,12 @@ export async function applyPreapproval(ctx, preapproval) {
       visibility: next === "pending" ? "internal" : "client",
     });
     if (next !== "pending") {
+      const newSale = fromSite && next === "active" && subscription.status === "pending";
+      const contractNext = newSale && (await contractsReady(ctx));
       await notify(ctx, await clientUserIds(db, subscription.client_id), {
         type: `subscription.${next}`,
         title: copy[0],
-        body: copy[1],
+        body: `${copy[1]}${contractNext ? CONTRACT_NEXT : ""}`,
         link: clientLink,
         entityType: "subscription",
         entityId: subscription.id,
@@ -750,12 +766,15 @@ export async function applyPreapproval(ctx, preapproval) {
       });
       await notify(ctx, await financeTeamIds(db), {
         type: `subscription.${next}`,
-        title: `${copy[0]} · ${client?.name ?? "Cliente"}`,
-        body: copy[1],
+        title: `${newSale ? "Nova assinatura pelo site" : copy[0]} · ${client?.name ?? "Cliente"}`,
+        body: newSale
+          ? `${copy[1]} Contratada pelo site.${contractNext ? " O contrato segue automaticamente para o cliente assinar." : ""}`
+          : copy[1],
         link: subscriptionLink(subscription.id),
         entityType: "subscription",
         entityId: subscription.id,
-        email: next !== "active",
+        // A new sale from the site is news for the team; a routine authorization is not.
+        email: next !== "active" || newSale,
       });
     }
     return { kind: "subscription", id: subscription.id, changed: true };

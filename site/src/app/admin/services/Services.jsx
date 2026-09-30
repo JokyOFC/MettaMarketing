@@ -1,5 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Check, FileStack, Layers, Pencil, Plus, Power } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, FileStack, Layers, Pencil, Plus, Power, ShoppingCart } from "lucide-react";
 import {
   Badge,
   Button,
@@ -79,6 +79,11 @@ function ServiceCard({ service, index, manage, first, last, busy, onEdit, onTogg
       <div className="fin-svc__head">
         <div className="fin-svc__badges">
           <StatusBadge kind="service" value={service.kind} size="sm" />
+          {service.slug && (
+            <Badge size="sm" tone="slate" icon={ShoppingCart}>
+              {service.active ? "À venda no site" : "No site: indisponível"}
+            </Badge>
+          )}
           {!service.active && (
             <Badge size="sm" tone="outline">
               Inativo

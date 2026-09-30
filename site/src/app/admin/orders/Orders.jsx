@@ -67,6 +67,17 @@ function ContractCell({ item }) {
         A gerar
       </Badge>
     );
+  // Site purchase: the contract follows the payment.
+  if (item.contractAfterPayment)
+    return ["paid", "active", "paused"].includes(item.status) ? (
+      <Badge size="sm" tone="amber" dot>
+        A gerar
+      </Badge>
+    ) : (
+      <Badge size="sm" tone="slate">
+        Após o pagamento
+      </Badge>
+    );
   return <span className="fin-quiet">—</span>;
 }
 

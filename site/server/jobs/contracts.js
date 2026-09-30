@@ -1,5 +1,5 @@
 import { isConfigured, avSettings } from "../services/assinavelox.js";
-import { ensureDefaultTemplates, runSend, syncContract } from "../services/contracts.js";
+import { ensureDefaultTemplates, runSend, sendContractAfterPayment, syncContract } from "../services/contracts.js";
 
 const MINUTE = 60 * 1000;
 
@@ -7,6 +7,9 @@ const MINUTE = 60 * 1000;
 // a periodic pass re-reads open envelopes from AssinaVelox ("contracts.sync")
 // so a missed webhook (or a local install without a public URL) never leaves
 // a contract stuck. ASSINAVELOX_SYNC_MINUTES = 0 turns the pass off.
+// Purchases made on the site get their contract once paid
+// ("contracts.after_payment", queued by the payment reconciliation); the same
+// pass picks up any that a restart left behind.
 export async function register(jobs, ctx) {
   const sending = new Set(); // contract ids with a send run in progress
   jobs.register(
@@ -18,6 +21,19 @@ export async function register(jobs, ctx) {
       return runSend(ctx, id).finally(() => sending.delete(id));
     },
     { concurrency: 2 },
+  );
+  const afterPayment = new Set(); // orders/subscriptions with a run in progress
+  jobs.register(
+    "contracts.after_payment",
+    (payload) => {
+      const key = payload?.orderId ? `order:${payload.orderId}` : payload?.subscriptionId ? `subscription:${payload.subscriptionId}` : null;
+      if (!key || afterPayment.has(key)) return undefined;
+      afterPayment.add(key);
+      return sendContractAfterPayment(ctx, { orderId: payload.orderId ?? null, subscriptionId: payload.subscriptionId ?? null })
+        .catch((err) => ctx.log?.warn?.(`[contracts] contract after payment failed: ${err.message}`))
+        .finally(() => afterPayment.delete(key));
+    },
+    { concurrency: 1 },
   );
   jobs.register(
     "contracts.sync",
@@ -36,7 +52,31 @@ export async function register(jobs, ctx) {
 
   let stopped = false;
   const tick = async () => {
-    if (stopped || !isConfigured(ctx.config)) return;
+    if (stopped) return;
+    try {
+      // Paid site purchases whose contract step never ran (runs even without
+      // AssinaVelox: the team is then told to arrange the contract).
+      const before = new Date(Date.now() - 2 * MINUTE).toISOString();
+      for (const row of await ctx.db.all(
+        `SELECT id FROM orders
+          WHERE contract_after_payment = 1 AND status = 'paid' AND contract_auto_at IS NULL
+            AND contract_waived_at IS NULL AND updated_at < ?
+          ORDER BY updated_at LIMIT 20`,
+        [before],
+      ))
+        jobs.enqueue("contracts.after_payment", { orderId: row.id });
+      for (const row of await ctx.db.all(
+        `SELECT id FROM subscriptions
+          WHERE contract_after_payment = 1 AND status IN ('active', 'paused') AND contract_auto_at IS NULL
+            AND contract_waived_at IS NULL AND updated_at < ?
+          ORDER BY updated_at LIMIT 20`,
+        [before],
+      ))
+        jobs.enqueue("contracts.after_payment", { subscriptionId: row.id });
+    } catch (err) {
+      ctx.log?.warn?.(`[contracts] after-payment scan failed: ${err.message}`);
+    }
+    if (!isConfigured(ctx.config)) return;
     const minutes = avSettings(ctx.config).syncMinutes;
     try {
       // Sending interrupted by a restart: resume (idempotent steps).

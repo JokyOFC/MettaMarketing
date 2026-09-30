@@ -26,6 +26,7 @@ produto.
 | `/painel/briefings` | `client/briefings/ClientBriefings.jsx` | H |
 | `/painel/briefings/:id` | `client/briefings/BriefingForm.jsx` | H |
 | `/painel/financeiro` | `client/billing/ClientBilling.jsx` | G |
+| `/painel/contratar/:slug` | `client/purchase/Purchase.jsx` (compra pelo site; sem sessão, `RequireAuth` leva a `/cadastro?next=…`) | G |
 | `/painel/notificacoes` | `client/notifications/ClientNotifications.jsx` | H |
 | `/painel/historico` | `client/history/ClientHistory.jsx` | I |
 | `/painel/conta` | `client/account/Account.jsx` | H |

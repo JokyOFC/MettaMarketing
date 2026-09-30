@@ -1,0 +1,119 @@
+/* Contratar pelo site: confirmação do pedido antes do Mercado Pago (prefix buy-).
+   Loaded after ui/index.js and fin.css; uses the --app-* tokens only. */
+
+.buy-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 20px;
+}
+@media (max-width: 899.98px) {
+  .buy-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.buy-offer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.buy-offer__title {
+  font-family: var(--app-font-display);
+  font-size: clamp(28px, 3.6vw, 38px);
+  font-weight: 300;
+  line-height: 1.15;
+  letter-spacing: -0.035em;
+  overflow-wrap: anywhere;
+}
+.buy-offer__desc {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--app-ink-2);
+}
+.buy-offer__items {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 18px 0 0;
+  border-top: 1px solid var(--app-line);
+  list-style: none;
+}
+.buy-offer__items li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--app-ink-2);
+}
+.buy-offer__items svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+  color: var(--app-olive-700);
+}
+
+.buy-side {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.buy-steps {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.buy-steps li {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 12px;
+}
+.buy-steps__num {
+  font-family: var(--app-font-accent);
+  font-size: 19px;
+  font-style: italic;
+  line-height: 1.2;
+  color: var(--app-olive-700);
+}
+.buy-steps strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--app-ink);
+}
+.buy-steps p {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--app-muted);
+}
+
+.buy-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.buy-form__secure {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--app-muted);
+}
+.buy-form__secure svg {
+  flex-shrink: 0;
+}
+.buy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}

@@ -55,10 +55,11 @@ const OTHER = "__other";
 /**
  * Adds the contract step after "Criado/Criada" in the order/subscription
  * journey. While a required contract is not signed, the payment steps that
- * come after it cannot be the current one.
+ * come after it cannot be the current one. Site purchases are paid first: the
+ * contract step comes right after the payment step (key "payment").
  */
 export function withContractStep(steps, item) {
-  if (!item.contractRequired && !item.contract && !item.contractWaiver) return steps;
+  if (!item.contractRequired && !item.contract && !item.contractWaiver && !item.contractAfterPayment) return steps;
   const status = item.contract?.status;
   let step;
   if (status === "completed") step = { label: "Contrato assinado", state: "done" };
@@ -67,9 +68,27 @@ export function withContractStep(steps, item) {
   else if (status === "failed") step = { label: "Contrato", state: "failed" };
   else if (status === "sent" || status === "sending") step = { label: "Contrato", state: "current" };
   else step = { label: "Contrato", state: item.contractRequired ? "current" : "todo" };
+  if (item.contractAfterPayment) {
+    const payment = steps.findIndex((s) => s.key === "payment");
+    const index = payment >= 0 ? payment + 1 : steps.length;
+    if (payment >= 0 && steps[payment].state === "done" && step.state === "todo") step = { ...step, state: "current" };
+    // One current step: what follows waits for the contract.
+    const pending = step.state === "current" || step.state === "failed";
+    const rest = steps.slice(index).map((s) => (pending && s.state === "current" ? { ...s, state: "todo" } : s));
+    return [...steps.slice(0, index), step, ...rest];
+  }
   const blocking = item.contractRequired && step.state !== "done";
   const rest = steps.slice(1).map((s) => (blocking && s.state === "current" ? { ...s, state: "todo" } : s));
   return [steps[0], step, ...rest];
+}
+
+// What happens with the contract of a site purchase, before and after the payment.
+function afterPaymentText(source) {
+  const paid = source.kind === "order" ? source.status === "paid" : ["active", "paused"].includes(source.status);
+  if (!paid)
+    return "Compra pelo site: o cliente paga primeiro e o contrato é enviado automaticamente assim que o pagamento for confirmado.";
+  if (!source.contractAutoAt) return "Pagamento confirmado pelo site. O contrato está sendo gerado para o cliente assinar.";
+  return "Pagamento confirmado pelo site, mas o contrato não saiu automaticamente. Gere e envie para o cliente assinar.";
 }
 
 export function contractFileUrl(contract, kind, download = false) {
@@ -312,7 +331,11 @@ function WaiveDialog({ open, onClose, source, onDone }) {
       size="sm"
       eyebrow="Contrato"
       title="Dispensar o contrato"
-      description="O pagamento deixa de esperar a assinatura. O motivo fica no histórico."
+      description={
+        source.contractAfterPayment
+          ? "Nenhum contrato é enviado para esta compra. O motivo fica no histórico."
+          : "O pagamento deixa de esperar a assinatura. O motivo fica no histórico."
+      }
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>
@@ -333,7 +356,8 @@ function WaiveDialog({ open, onClose, source, onDone }) {
 
 /**
  * source: { kind: 'order'|'subscription', id, clientId, title, status, contract,
- *           contractRequired, contractSatisfied, contractWaiver }
+ *           contractRequired, contractSatisfied, contractWaiver,
+ *           contractAfterPayment, contractAutoAt }
  */
 export default function ContractSection({ source, canManage, canConfigure, onChanged }) {
   const toast = useToast();
@@ -401,9 +425,10 @@ export default function ContractSection({ source, canManage, canConfigure, onCha
 
   const mettaSigner = contract?.signers?.find((s) => s.role === "metta");
   const canSignHere = contract?.status === "sent" && mettaSigner?.turn && mettaSigner?.isYou;
+  // A site purchase gets its contract after the payment, so a paid order still takes one.
   const orderOpen =
     source.kind === "order"
-      ? ["draft", "pending_payment", "failed"].includes(source.status)
+      ? ["draft", "pending_payment", "failed", ...(source.contractAfterPayment ? ["paid"] : [])].includes(source.status)
       : ["pending", "active", "paused", "failed"].includes(source.status);
   const terminal = contract && ["refused", "expired", "canceled"].includes(contract.status);
   const ready = integration?.ready;
@@ -461,7 +486,11 @@ export default function ContractSection({ source, canManage, canConfigure, onCha
         <p className="ct-card__text">
           {source.contractRequired
             ? "O pagamento só é liberado ao cliente depois que ele e a Metta assinarem o contrato."
-            : "Envie o contrato para assinatura antes de começar o trabalho."}
+            : source.contractAfterPayment
+              ? terminal
+                ? "Gere um novo contrato para o cliente assinar."
+                : afterPaymentText(source)
+              : "Envie o contrato para assinatura antes de começar o trabalho."}
         </p>
         {!ready && integration.issues?.length > 0 && (
           <ul className="ct-list">
@@ -475,7 +504,7 @@ export default function ContractSection({ source, canManage, canConfigure, onCha
             <Button variant="primary" icon={FileSignature} disabled={!ready} onClick={() => setDialog("send")}>
               {terminal ? "Gerar novo contrato" : "Gerar contrato"}
             </Button>
-            {source.contractRequired && (
+            {(source.contractRequired || source.contractAfterPayment) && (
               <Button variant="ghost" onClick={() => setDialog("waive")}>
                 Dispensar contrato
               </Button>

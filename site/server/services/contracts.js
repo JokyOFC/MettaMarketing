@@ -10,6 +10,10 @@
 // sync read the envelope from the API (the source of truth) → on completion
 // the final PDF and the evidence page are stored privately and, when the
 // setting is on, payment is released.
+//
+// Purchases made on the site (contract_after_payment) go the other way round:
+// the client pays first and sendContractAfterPayment() sends the contract to
+// the buyer once the payment is confirmed.
 import { randomUUID } from "node:crypto";
 import { conflict, HttpError, notConfigured, notFound, validation } from "../lib/errors.js";
 import { logActivity } from "../lib/audit.js";
@@ -212,6 +216,7 @@ export async function loadSource(db, { orderId, subscriptionId, brandId }) {
       dueDate: order.due_date ?? null,
       status: order.status,
       waived: Boolean(order.contract_waived_at),
+      afterPayment: Boolean(order.contract_after_payment),
     };
   }
   const subscription = await db.get("SELECT * FROM subscriptions WHERE id = ?", [subscriptionId]);
@@ -235,6 +240,7 @@ export async function loadSource(db, { orderId, subscriptionId, brandId }) {
     dueDate: null,
     status: subscription.status,
     waived: Boolean(subscription.contract_waived_at),
+    afterPayment: Boolean(subscription.contract_after_payment),
   };
 }
 
@@ -316,15 +322,28 @@ export async function renderTemplateExample(db, kind, override = null) {
 
 /**
  * Whether payment must wait for the contract. Only enforced when the
- * integration is configured and the setting is on; a waiver lifts it.
+ * integration is configured and the setting is on; a waiver lifts it, and
+ * purchases made on the site (afterPayment) get the contract after paying.
  */
-export async function contractGate(ctx, { orderId = null, subscriptionId = null, waived = false } = {}) {
+export async function contractGate(ctx, { orderId = null, subscriptionId = null, waived = false, afterPayment = false } = {}) {
   const { db, config } = ctx;
   const settings = await contractSettings(db);
   const contract = await latestContract(db, { orderId, subscriptionId });
-  const required = Boolean(settings.requiredBeforePayment) && isConfigured(config) && !waived;
+  const required = Boolean(settings.requiredBeforePayment) && isConfigured(config) && !waived && !afterPayment;
   const satisfied = !required || contract?.status === "completed";
   return { required, satisfied, waived, contract };
+}
+
+/**
+ * Whether a contract can go out right now: integration configured, Metta's
+ * signer and forum set, templates reviewed. Site purchases promise the
+ * contract to the client only then.
+ */
+export async function contractsReady(ctx) {
+  if (!isConfigured(ctx.config)) return false;
+  if (settingsIssues(await contractSettings(ctx.db)).length) return false;
+  for (const kind of KINDS) if (!(await currentTemplate(ctx.db, kind)).created_by) return false;
+  return true;
 }
 
 export async function latestContract(db, { orderId = null, subscriptionId = null }) {
@@ -456,7 +475,9 @@ function assertSendable(ctx, source, settings, templateRow) {
   if (issues.length) throw conflict(`${issues.join(" ")} Ajuste em Configurações › Contratos.`);
   if (!templateRow.created_by)
     throw conflict("Revise e salve o modelo de contrato em Configurações › Contratos antes do primeiro envio.");
-  if (source.order && !["draft", "pending_payment", "failed"].includes(source.status))
+  // A purchase made on the site gets its contract after the payment.
+  const orderStatuses = source.afterPayment ? ["draft", "pending_payment", "failed", "paid"] : ["draft", "pending_payment", "failed"];
+  if (source.order && !orderStatuses.includes(source.status))
     throw conflict("Este pedido já foi pago ou encerrado; não precisa de contrato novo.");
   if (source.subscription && !["pending", "active", "paused", "failed"].includes(source.status))
     throw conflict("Esta assinatura está cancelada.");
@@ -484,28 +505,31 @@ export async function previewContract(req, { orderId, subscriptionId, brandId, s
 /**
  * Creates the contract row (status 'sending') and queues the sending job.
  * The PDF is rendered here, so a template edit made afterwards never changes
- * what this client receives.
+ * what this client receives. `source` is the request of the person sending
+ * it, or the context for the automatic sending after a site purchase.
+ * An existing live contract answers 409 with code 'contract_exists'.
  */
-export async function createContract(req, { orderId, subscriptionId, brandId, signer, expiresInDays }) {
-  const { ctx, user } = req;
+export async function createContract(source, { orderId, subscriptionId, brandId, signer, expiresInDays }) {
+  const ctx = source.ctx ?? source;
+  const user = source.user ?? null;
   const { db, storage } = ctx;
-  const source = await loadSource(db, { orderId, subscriptionId, brandId });
+  const item = await loadSource(db, { orderId, subscriptionId, brandId });
   const settings = await contractSettings(db);
-  const template = await currentTemplate(db, source.kind);
-  assertSendable(ctx, source, settings, template);
+  const template = await currentTemplate(db, item.kind);
+  assertSendable(ctx, item, settings, template);
   const open = await latestContract(db, { orderId, subscriptionId });
   if (open && ["sending", "sent", "failed"].includes(open.status))
-    throw conflict("Já existe um contrato em andamento para este item. Cancele-o antes de enviar outro.");
-  if (open?.status === "completed") throw conflict("O contrato deste item já foi concluído.");
+    throw conflict("Já existe um contrato em andamento para este item. Cancele-o antes de enviar outro.", "contract_exists");
+  if (open?.status === "completed") throw conflict("O contrato deste item já foi concluído.", "contract_exists");
 
-  const resolved = await resolveSigner(db, source, signer);
+  const resolved = await resolveSigner(db, item, signer);
   if (resolved.email === String(settings.signerEmail).toLowerCase())
     throw validation({ "signer.email": "Quem assina pelo cliente precisa ser outra pessoa, diferente do representante da Metta." });
 
   const id = newId("ctr");
   const code = contractCode(id);
   const issuedAt = now();
-  const out = await renderFor({ template, source, settings, signer: resolved, code, issuedAt, preview: null });
+  const out = await renderFor({ template, source: item, settings, signer: resolved, code, issuedAt, preview: null });
   const stored = await storage.putBuffer(Buffer.from(out.bytes));
   const days = Math.min(90, Math.max(1, Number(expiresInDays) || settings.expiresInDays || 15));
   const data = {
@@ -519,7 +543,7 @@ export async function createContract(req, { orderId, subscriptionId, brandId, si
       // transaction (transactions run one at a time) to close the race window.
       const live = await latestContract(db, { orderId, subscriptionId });
       if (live && ["sending", "sent", "failed", "completed"].includes(live.status))
-        throw conflict("Já existe um contrato em andamento para este item. Atualize a página.");
+        throw conflict("Já existe um contrato em andamento para este item. Atualize a página.", "contract_exists");
       await db.run(
         `INSERT INTO contracts (id, client_id, brand_id, order_id, subscription_id, kind, template_version_id, title, status,
            client_signer_name, client_signer_email, client_signer_user_id, metta_signer_name, metta_signer_email,
@@ -528,13 +552,13 @@ export async function createContract(req, { orderId, subscriptionId, brandId, si
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
         [
           id,
-          source.client.id,
-          source.brand?.id ?? null,
-          source.order?.id ?? null,
-          source.subscription?.id ?? null,
-          source.kind,
+          item.client.id,
+          item.brand?.id ?? null,
+          item.order?.id ?? null,
+          item.subscription?.id ?? null,
+          item.kind,
           template.id,
-          `${out.title} — ${source.description}`,
+          `${out.title} — ${item.description}`,
           resolved.name,
           resolved.email,
           resolved.userId,
@@ -546,24 +570,31 @@ export async function createContract(req, { orderId, subscriptionId, brandId, si
           stored.size,
           out.pages,
           JSON.stringify(data),
-          user.id,
+          user?.id ?? null,
           issuedAt,
           issuedAt,
         ],
       );
-      await logActivity(req, {
+      await logActivity(source, {
         action: "contract.created",
         entityType: "contract",
         entityId: id,
-        clientId: source.client.id,
-        brandId: source.brand?.id ?? null,
-        summary: `${user.name} gerou o contrato ${code} (${source.description}) para assinatura de ${resolved.name}`,
-        data: { orderId: source.order?.id ?? null, subscriptionId: source.subscription?.id ?? null, templateVersion: template.version },
+        clientId: item.client.id,
+        brandId: item.brand?.id ?? null,
+        summary: user
+          ? `${user.name} gerou o contrato ${code} (${item.description}) para assinatura de ${resolved.name}`
+          : `Contrato ${code} (${item.description}) gerado automaticamente depois do pagamento, para assinatura de ${resolved.name}`,
+        data: {
+          orderId: item.order?.id ?? null,
+          subscriptionId: item.subscription?.id ?? null,
+          templateVersion: template.version,
+          ...(user ? {} : { automatic: true }),
+        },
       });
     });
   } catch (err) {
     await storage.remove(stored.key).catch(() => {});
-    if (err?.code === "ER_DUP_ENTRY") throw conflict("Já existe um contrato em andamento para este item. Atualize a página.");
+    if (err?.code === "ER_DUP_ENTRY") throw conflict("Já existe um contrato em andamento para este item. Atualize a página.", "contract_exists");
     throw err;
   }
   ctx.jobs?.enqueue("contracts.send", { contractId: id });
@@ -743,15 +774,15 @@ export async function runSend(ctx, contractId) {
         summary: `O envio do contrato ${code} para a AssinaVelox falhou: ${message}`,
         data: { step: (await db.get("SELECT step FROM contracts WHERE id = ?", [row.id]))?.step ?? null },
       });
-      if (row.created_by)
-        await notify(ctx, [row.created_by], {
-          type: "contract.failed",
-          title: "O contrato não foi enviado",
-          body: `${code}: ${message}`,
-          link: contractStaffLink(row),
-          entityType: "contract",
-          entityId: row.id,
-        });
+      // Automatic contracts (site purchases) have no author: finance and admins follow them.
+      await notify(ctx, row.created_by ? [row.created_by] : await financeAndAdminIds(db), {
+        type: "contract.failed",
+        title: "O contrato não foi enviado",
+        body: `${code}: ${message}`,
+        link: contractStaffLink(row),
+        entityType: "contract",
+        entityId: row.id,
+      });
     });
     return await db.get("SELECT * FROM contracts WHERE id = ?", [row.id]);
   }
@@ -982,7 +1013,7 @@ async function announceTransitions(ctx, row, transitions) {
           summary: `Contrato ${code} concluído: aceite das duas partes registrado`,
           visibility: "client",
         });
-        const gateLifted = (await contractSettings(db)).requiredBeforePayment;
+        const gateLifted = (await contractSettings(db)).requiredBeforePayment && !(await paidFirst(db, row));
         await notify(ctx, await clientUserIds(db, row.client_id), {
           type: "contract.completed",
           title: "Contrato concluído",
@@ -1024,6 +1055,91 @@ async function announceTransitions(ctx, row, transitions) {
       }
     }
   });
+}
+
+// ------------------------------------------------------------------ after payment (site purchases)
+
+/** Whether the order/subscription of a contract was bought on the site (paid first). */
+async function paidFirst(db, row) {
+  const table = row.order_id ? "orders" : row.subscription_id ? "subscriptions" : null;
+  if (!table) return false;
+  const item = await db.get(`SELECT contract_after_payment FROM ${table} WHERE id = ?`, [row.order_id ?? row.subscription_id]);
+  return Boolean(item?.contract_after_payment);
+}
+
+/**
+ * Site purchases are paid first. Once the payment is confirmed (order paid,
+ * subscription authorized), the contract goes to the person who bought,
+ * without anyone at Metta pressing a button. When it cannot go (integration or
+ * settings not ready, no active access to sign), finance and admins are told
+ * why and send it from the panel. Runs once per item (contract_auto_at) and
+ * never duplicates a live contract. -> contract row | null
+ */
+export async function sendContractAfterPayment(ctx, { orderId = null, subscriptionId = null } = {}) {
+  const { db } = ctx;
+  if (Boolean(orderId) === Boolean(subscriptionId)) return null;
+  const table = orderId ? "orders" : "subscriptions";
+  const id = orderId ?? subscriptionId;
+  const item = await db.get(`SELECT * FROM ${table} WHERE id = ?`, [id]);
+  if (!item?.contract_after_payment || item.contract_auto_at || item.contract_waived_at) return null;
+  const paid = orderId ? item.status === "paid" : ["active", "paused"].includes(item.status);
+  if (!paid) return null;
+
+  let contract = null;
+  let problem = null;
+  const live = await latestContract(db, { orderId, subscriptionId });
+  // Someone at Metta may have sent it already.
+  if (!live || !["sending", "sent", "failed", "completed"].includes(live.status)) {
+    try {
+      // The person who bought signs; if that access is gone, another active one of the client.
+      const signer =
+        (await db.get("SELECT id FROM users WHERE id = ? AND client_id = ? AND status = 'active'", [item.created_by, item.client_id])) ??
+        (await db.get(
+          "SELECT id FROM users WHERE client_id = ? AND role = 'client' AND status = 'active' ORDER BY created_at, id LIMIT 1",
+          [item.client_id],
+        ));
+      if (!signer) throw conflict("O cliente não tem um acesso ativo para assinar.");
+      contract = await createContract(ctx, { orderId, subscriptionId, signer: { userId: signer.id } });
+    } catch (err) {
+      if (err?.code !== "contract_exists") {
+        problem = err instanceof HttpError ? (err.fields ? Object.values(err.fields).join(" ") : err.message) : "Falha inesperada ao gerar o contrato.";
+        if (!(err instanceof HttpError)) ctx.log?.error?.("[contracts] contract after payment failed:", err);
+      }
+    }
+  }
+
+  await db.tx(async () => {
+    const at = now();
+    const { changes } = await db.run(`UPDATE ${table} SET contract_auto_at = ?, updated_at = ? WHERE id = ? AND contract_auto_at IS NULL`, [
+      at,
+      at,
+      id,
+    ]);
+    if (!changes || !problem) return;
+    const client = await db.get("SELECT name FROM clients WHERE id = ?", [item.client_id]);
+    const service = item.service_id ? await db.get("SELECT name FROM services WHERE id = ?", [item.service_id]) : null;
+    const what = orderId ? item.description : `Plano ${service?.name ?? ""}`.trim();
+    const entityType = orderId ? "order" : "subscription";
+    await logActivity(ctx, {
+      action: "contract.not_sent_after_payment",
+      entityType,
+      entityId: id,
+      clientId: item.client_id,
+      brandId: item.brand_id ?? null,
+      summary: `Compra paga pelo site sem contrato enviado: ${problem}`,
+    });
+    await notify(ctx, await financeAndAdminIds(db), {
+      type: "contract.needs_sending",
+      title: `Envie o contrato · ${client?.name ?? "Cliente"}`,
+      body: `${what}: pagamento confirmado pelo site, mas o contrato não saiu automaticamente. ${problem}`,
+      link: orderId ? `/admin/pedidos?pedido=${id}` : `/admin/pedidos?aba=assinaturas&assinatura=${id}`,
+      entityType,
+      entityId: id,
+      email: true,
+      actionLabel: "Abrir no painel",
+    });
+  });
+  return contract;
 }
 
 // ------------------------------------------------------------------ cancel & waive
