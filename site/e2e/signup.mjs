@@ -62,13 +62,18 @@ async function shot(page, name, opts) {
   return page.shot(join(SHOTS, `${String(shotNo).padStart(2, "0")}-${name}.png`), opts);
 }
 
+// Signed out, the app asks /api/auth/me once and gets 401, as expected.
+const signedOut = (page, fn) => page.allowing([{ status: 401, pattern: /^\/api\/auth\/me/ }], fn);
+
 const steps = [];
 const step = (id, title, fn) => steps.push({ id, title, fn });
 
 step("form", "Visitante cria a conta e entra direto na área do cliente", async () => {
   const visitor = await pageFor("visitor");
-  await visitor.goto("/cadastro");
-  await visitor.waitText("Crie o acesso da sua");
+  await signedOut(visitor, async () => {
+    await visitor.goto("/cadastro");
+    await visitor.waitText("Crie o acesso da sua");
+  });
   await shot(visitor, "cadastro-vazio", { full: true });
   await visitor.fill("Seu nome", PERSON.name);
   await visitor.fill("E-mail", PERSON.email);
@@ -89,7 +94,7 @@ step("form", "Visitante cria a conta e entra direto na área do cliente", async 
 
 step("login", "Em outro aparelho, a pessoa entra com a senha criada", async () => {
   const returning = await pageFor("returning");
-  await returning.goto("/login");
+  await signedOut(returning, () => returning.goto("/login"));
   await returning.fill("E-mail", PERSON.email);
   await returning.fill("Senha", PERSON.password);
   await returning.click("Entrar", { role: "button" });
